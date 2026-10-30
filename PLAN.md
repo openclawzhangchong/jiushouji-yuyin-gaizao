@@ -257,4 +257,44 @@ SHA-256 `3cffc2b0438df00ec38fef1619b70d5af55241ebdf50b86c2fcb4dac402c2b92`。
 **连续 247 秒水位稳在 280-360ms**，代价 156 次丢块 ≈ 总音频 1.3%（多数来自 WiFi 打嗝后的 TCP 突发补货）。
 取代表：宁可丢 20ms 碎片，也不要延迟永久台阶上升。
 
+## 12. EXE 内置 APK + adb 自动安装（2026-10-30 傍晚，用户追加）
+
+**需求**：手机上有时候不方便下 APK。所以 APK 除了单独提供，还要**打进 EXE**；
+电脑只要检测到平板插着 adb，就自动 `adb install -r`，并顺手把自己 IP 推给平板。
+
+**已实现**（`ensure_apk()` / `bundled_apk()` / `lan_ip()`）：
+
+| 行为 | 细节 |
+|---|---|
+| 触发时机 | 启动后、以及"平板在线但**当前没有客户端在推流**"时（每掉线一次只做一次），绝不打断正在用的麦克风 |
+| 版本判定 | 版本号**从文件名 `mic-bridge-<ver>.apk` 解析**，不维护额外常量（免得忘记同步）；`build.sh` 本来就强制过 badging 自证 |
+| 三种决策 | 没装过→装；同版本→跳过；**平板更新→不降级只提示**并给出 `adb uninstall` 处置 |
+| 装完做什么 | `am start --ez auto true --es lan <本机IP>`，把"手填 IP"那步也省掉 |
+| 手动入口 | `--install-apk`（只装不启动音频）、`--no-auto-install`、`--adb <路径>` |
+
+**验证**：
+
+1. 不插设备的逻辑测试 `test_auto_install.py`（造一个假 adb 转发脚本，覆盖三态）——
+   **7 条断言全通过**：判定没装过并执行安装 / 确实调用 `adb install` / 随后下发 `am start`
+   且带 `--es lan` 与 `auto true` / 同版本跳过 / 不误调 install / 平板版本更新时拒绝降级。
+2. 内置 APK 真在包内：跑 `mbr_new.exe --install-apk --adb <假adb>`，
+   假 adb 记录到 `install C:\Users\...\Temp\_MEI0000781c2\mic-bridge-0.5.0.apk`
+   与 `start -n com.zcstudy.micbridge/.MainActivity --ez auto true --es lan 192.168.168.250`。
+   附带好处：PyInstaller 的解包临时目录是纯 ASCII，adb 拿到的路径不再含中文。
+3. 换新 EXE 后平板**约 20 秒自动重连**，继续 31672 B/s、水位 260–280ms、欠载 0。
+4. Release 资产核对：远端 `mic-bridge-receiver.exe` 21,095,203 B /
+   `sha256:d74f7db0e644a9a4…`，**与本地逐字节一致**；Release 正文重写过（4188 字），
+   含三种用法、前置条件、行为约定、实测数字、故障对照表、文件校验。
+
+**这一轮又踩到的坑**（已进 AGENTS 第 46–51 条）：`--add-data` 的源路径是相对 `--specpath` 解析的；
+旧 EXE 在跑时 PyInstaller 报 `PermissionError` 但**构建不中断**，差点把旧二进制当成新产物；
+`gh release upload` 没有 `--overwrite`（会静默不上传），要用 `--clobber`；
+`run_adb` 默认按 GBK 解码会把设备检测吞成静默失败；`adb install` 会回显含中文的路径；
+原来的 `timeout=10` 会掐死 push install。
+
+**仍未验证（别写成已完成）**：v0.5.0 的 APK **还没真正装进平板**——数据线已拔、adb 不可用。
+所以"自动安装"只验到了**决策逻辑**和**包内资源可见**，
+硬件侧那一步（adb 真装成功 + 平板真被配好网）**没跑过**。
+下次插上数据线直接运行 `mic-bridge-receiver.exe` 就能补测。
+
 

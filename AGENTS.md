@@ -194,6 +194,23 @@ pyinstaller --onefile --console --name mic-bridge-receiver pc_receiver.py
 ### 现在到底装的是哪一版（别说错）
 
 - 平板上**当前实跑 v0.4.1**（心跳硬要求已生效）。
-- `release/mic-bridge-0.5.0.apk` 已构建但 **`adb install` 当时因设备掉线未成功**，
+- `release/mic-bridge-0.5.0.apk` 已构建、已进 EXE、已上 Release，但**没装进平板** ——
+  `adb install` 当时赶上设备掉线、随后用户把数据线拔了。
   它多的是"连上却收不到心跳就翻转链路优先级"这条逻辑，**尚未真机验证**。
-  验证要等 USB 恢复：`adb install -r release/mic-bridge-0.5.0.apk`。
+  验证要等 USB 恢复：`adb install -r release/mic-bridge-0.5.0.apk`，
+  或者直接跑 `mic-bridge-receiver.exe`（它会自动装）。
+
+### 自动装 APK 这套逻辑的坑
+
+| # | 坑 | 正解 |
+|---|---|---|
+| 46 | `bundled_apk()` 从 `sys._MEIPASS` 找内置 APK；从源码跑时没有 `_MEIPASS`，会找不到 | 同时搜 `base` 和 `base/release`，两条路行为一致 |
+| 47 | 内置 APK 的版本号如果写成代码常量，迟早忘记同步 | **版本号从文件名 `mic-bridge-<ver>.apk` 解析**，`build.sh` 本来就强制过版本自证 |
+| 48 | `run_adb` 用 `text=True` 默认按本地代码页（这台是 **GBK**）解码；`adb install` 会把含中文的 APK 路径回显出来，解码异常会被 `except` 吞成"设备检测静默失效" | 显式 `encoding="utf-8", errors="replace"` |
+| 49 | `run_adb` 原来的 `timeout=10` 会把 `adb install` 掐死（push install 本身就好几秒） | 超时放宽到 180；安装只放在后台线程里跑 |
+| 50 | 自动安装会 `am start` 重启平板上的 Activity，**打断正在推流的麦克风** | 只在"平板在线且**当前没有客户端在推流**"时才做，且每掉线一次只做一次 |
+| 51 | 平板上版本比内置新时装机会**降级**（v0.9 被换成 v0.5） | 比较 `versionName`，更新就只提示不装，并给出手动 `adb uninstall` 的处置 |
+
+不插设备也能验这套决策：`python test_auto_install.py`（造假 adb，覆盖
+"没装过 / 同版本 / 平板更新"三态并断言是否调用 install、是否下发 IP）。
+**改 `ensure_apk` 之后必须重跑它。**

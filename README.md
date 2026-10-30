@@ -131,6 +131,44 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity \
 
 ---
 
+## 手机端不方便下载 APK？EXE 会自己装（2026-10-30 新增）
+
+`mic-bridge-receiver.exe` 里**内置了同版本的 APK**。只要它检测到 adb 上有平板在线，就会：
+
+1. `dumpsys package com.zcstudy.micbridge` 查已装版本；
+2. **没装或版本旧** → 自动 `adb install -r`（平板上不需要浏览器/网盘/传文件）；
+3. 装完再 `am start --ez auto true --es lan <本机局域网IP>` ——
+   顺手把自己 IP 推给平板并开始送话，**连"在平板上手填 IP"都省了**。
+
+三条保护：平板上的版本比内置的**更新**时不降级只提示；同版本跳过安装；
+**平板正在推流时绝不动它**（不会因为"顺手升级"打断正在用的麦克风）。
+
+```powershell
+.\mic-bridge-receiver.exe --install-apk      # 只做一次安装+配网然后退出
+.\mic-bridge-receiver.exe --no-auto-install  # 不希望它碰平板
+.\mic-bridge-receiver.exe --adb D:\path\adb.exe   # adb 不在默认位置时指定
+```
+
+这套逻辑有个**不插设备也能跑**的测试：`python test_auto_install.py`
+（造一个假 adb 转发脚本，把"没装过 / 同版本 / 平板版本更新"三种状态各验一遍并断言决策）。
+
+### 怎么打出这个 EXE
+
+```bash
+pyinstaller --onefile --console --name mic-bridge-receiver \
+    --add-data "<绝对路径>/release/mic-bridge-0.5.0.apk;." pc_receiver.py
+```
+
+两个必须知道的坑：
+- `--add-data` 的**源路径是相对 `--specpath` 解析的**，不是当前工作目录 → 一律写绝对路径，
+  否则报 `Unable to find ...`。
+- **目标 EXE 正在运行时 PyInstaller 会 `PermissionError` 且构建不中断**，
+  于是你会拿着旧二进制以为是新的。判据只有产物**字节数 + sha256**。
+- 打完必须 `.\mic-bridge-receiver.exe --list` 能列出 CABLE 设备，才说明 PortAudio 真被打包进去了。
+- EXE 与 APK 都**不进 git**（`dist/` 已忽略），走 GitHub Release `v0.5.0`；
+  更新资产用 `gh release upload <tag> <file> --clobber`（**没有 `--overwrite` 这个参数，会静默不上传**），
+  上传后回读 `releases/latest` 的 `.assets[].digest` 核对。
+
 ## WiFi 模式：平板不插线也能用（2026-10-30 已真机验证）
 
 平板把音频**主动 TCP 推到电脑**，所以只要平板能出站打到那台电脑就行，不需要那台电脑能反向找到平板。

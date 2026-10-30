@@ -7,7 +7,7 @@ Windows 因此多出一个叫 CABLE Output 的麦克风，任何程序都能选�
   python pc_receiver.py --list          # 看设备索引
   python pc_receiver.py --record 10     # 顺手从 CABLE Output 录 10s 存 verify.wav
 """
-import argparse, collections, os, socket, subprocess, sys, threading, time, wave
+import argparse, collections, glob, os, re, socket, subprocess, sys, threading, time, wave
 import numpy as np
 import sounddevice as sd
 
@@ -21,6 +21,8 @@ PORT = 5005
 PONG = b"P"                          # 协议：每 2 秒回写 1 字节，平板 6 秒收不到就重选链路
 PONG_EVERY = 2.0
 GAP_MS = 50.0                        # 包间隔超过这个值算一次"网络打嗝"
+PKG = "com.zcstudy.micbridge"
+ACTIVITY = PKG + "/.MainActivity"
 ADB_CANDIDATES = [
     os.path.expandvars(
         r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
@@ -43,7 +45,11 @@ def find_adb():
 
 def run_adb(adb, *args):
     try:
-        r = subprocess.run([adb] + list(args), capture_output=True, text=True, timeout=10)
+        # 显式 utf-8 + replace：subprocess 的 text=True 默认按本地代码页（这台是 GBK）解码，
+        # 而 adb 会把含中文的 APK 路径原样回显 —— 解码炸了会被下面的 except 吞掉，
+        # 表现成"设备检测静默失效"这种最难查的故障。我们只 grep ASCII 关键字，乱码无所谓。
+        r = subprocess.run([adb] + list(args), capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=180)
         return (r.stdout or "") + (r.stderr or "")
     except Exception as e:
         return "ERR " + str(e)
@@ -57,6 +63,89 @@ def device_present(adb):
         if len(p) >= 2 and p[1] == "device":
             return True
     return False
+
+
+def bundled_apk():
+    """打包后的 EXE 里找内置 APK；从源码跑时退回去找 release/，两条路行为一致。
+    版本号直接从文件名取，省得再维护一份会忘记改的常量。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    cands = []
+    for d in (base, os.path.join(base, "release")):
+        cands += glob.glob(os.path.join(d, "mic-bridge-*.apk"))
+    if not cands:
+        return None, None
+
+    def v_of(path):
+        m = re.search(r"mic-bridge-([0-9][0-9.]*)\.apk$", os.path.basename(path))
+        return vtuple(m.group(1)) if m else (0,)
+
+    p = sorted(cands, key=v_of)[-1]          # 按版本号排，别按字符串（0.10.0 会排在 0.5.0 前）
+    m = re.search(r"mic-bridge-([0-9][0-9.]*)\.apk$", os.path.basename(p))
+    return p, (m.group(1) if m else "0.0.0")
+
+
+def vtuple(s):
+    try:
+        return tuple(int(x) for x in s.split("."))
+    except ValueError:
+        return (0,)
+
+
+def installed_version(adb):
+    out = run_adb(adb, "shell", "dumpsys", "package", PKG)
+    m = re.search(r"versionName=(\S+)", out)
+    return m.group(1) if m else None
+
+
+def lan_ip():
+    """不真发包，只问内核"我要去公网会用哪个源地址"，那就是平板能打到我的地址。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        s.close()
+
+
+def ensure_apk(adb, a, log=print):
+    """手机不方便下 APK 时的兜底：检测到平板上没装/版本旧，就用 adb 直接把内置 APK 装上去，
+    顺手把本机局域网 IP 通过 intent 推给平板，省掉手填那一步。"""
+    if a.no_auto_install:
+        return
+    apk, ver = bundled_apk()
+    if apk is None:
+        log("（本次运行没有内置 APK —— 从源码跑时正常；EXE 打包要用 --add-data 带上 release/*.apk）")
+        return
+    if not device_present(adb):
+        return
+    cur = installed_version(adb)
+    if cur == ver:
+        log("平板已是 v%s，跳过安装" % ver)
+    elif cur is not None and vtuple(cur) > vtuple(ver):
+        log("!! 平板上装的是 v%s，比本程序内置的 v%s 新 —— 不降级，跳过。"
+            "要重装请先 adb uninstall %s" % (cur, ver, PKG))
+        return
+    else:
+        log("平板%s（内置 v%s），执行 adb install -r …" % ("没装过" if cur is None else "版本较旧 v%s" % cur, ver))
+        out = run_adb(adb, "install", "-r", apk)
+        if "Success" not in out:
+            log("!! 安装失败：%s" % out.strip()[:300])
+            return
+        log("   安装成功")
+    if not a.no_autostart:
+        ip = lan_ip()
+        if ip:
+            # --ez 只认 true/false；lan 用本机局域网地址，平板经 NAT 也能打到
+            out = run_adb(adb, "shell", "am", "start", "-n", ACTIVITY,
+                          "--ez", "auto", "true", "--es", "lan", ip)
+            if "Error" in out or "Exception" in out:
+                log("!! 自动启动失败：%s（可在平板上手动点「开始送话」）" % out.strip()[:200])
+            else:
+                log("   已让平板开始送话，并把本机 IP 设为 %s:%d" % (ip, PORT))
+        else:
+            log("（拿不到本机局域网 IP，只安装不自动配网；请在平板界面手填）")
 
 
 def pick(pattern, need_in, prefer=(1, 0, 3, 2)):
@@ -94,6 +183,13 @@ def main():
     ap.add_argument("--record", type=float, default=0, help="从 CABLE Output 录 N 秒存 verify.wav")
     ap.add_argument("--recv-bytes", type=int, default=3200,
                     help="单次最多读多少字节。65536 会一口吞掉 2 秒音频，把预缓冲直接顶过头")
+    ap.add_argument("--no-auto-install", action="store_true",
+                    help="不要用 adb 自动给平板装内置 APK")
+    ap.add_argument("--no-autostart", action="store_true",
+                    help="装完不要自动让平板开始送话/下发本机 IP")
+    ap.add_argument("--install-apk", action="store_true",
+                    help="只执行一次自动安装+配网然后退出（不启动音频链路）")
+    ap.add_argument("--adb", default=None, help="指定 adb 可执行文件路径（默认自动找）")
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args()
 
@@ -103,7 +199,14 @@ def main():
                                                  d["max_output_channels"], d["name"]))
         return 0
 
-    adb = find_adb()          # WiFi 模式的远端电脑没有平板数据线，没有 adb 也要能跑
+    adb = (a.adb if a.adb else find_adb())   # WiFi 模式的远端电脑没有平板数据线，没有 adb 也要能跑
+
+    if a.install_apk:
+        if not adb:
+            print("!! 没找到 adb，无法自动安装。请手动 adb install -r 内置的同版 APK。")
+            return 2
+        ensure_apk(adb, a)
+        return 0
 
     out_idx, out_name = (a.out, "(指定)") if a.out is not None else pick("CABLE Input", False)
     lat = None if a.latency == "default" else (
@@ -127,7 +230,8 @@ def main():
     lock = threading.Lock()
     st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True,
               link="?", water=a.water, max_water=a.max_water,
-              last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0)
+              last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0,
+              install_tried=False)
 
     def depth_ms():
         return sum(len(x) for x in buf) * 1000.0 / SR
@@ -306,8 +410,15 @@ def main():
                 rate = (st["recv"] - vlast) / max(now - tlast, 1e-6)
                 dpk = st["pkts"] - vpkts
                 tlast, vlast, vpkts = now, st["recv"], st["pkts"]
-                if want_loopback and adb and st["client"] is None and device_present(adb):
-                    run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
+                if adb and st["client"] is None and device_present(adb):
+                    if want_loopback:
+                        run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
+                    if not st["install_tried"]:
+                        st["install_tried"] = True
+                        # 只在没人在推流时动平板，免得为"顺手升级"打断用户正在用的麦克风
+                        threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
+                elif st["client"] is not None:
+                    st["install_tried"] = False
                 with lock:
                     w = depth_ms()
                 print("[%s] %s 水位%.0fms %dB/s 包间隔 本窗>%.0fms:%d/%d >200ms:%d 最大%.0fms "
