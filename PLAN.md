@@ -114,6 +114,7 @@ python pc_receiver.py --record 34   # 录下 CABLE Output，再丢给 ASR
 | 4 | 声学有效性 | verify.wav 包络：0–5s = -97dBFS 数字静音；**7–16s 平均 -8.7dBFS、峰值 -3.3dB**；17s 后回落 -50dB 底噪。频谱 1000-2000Hz 最强，是语音形状 |
 | 5 | 断线自恢复 | 杀掉接收端 → App 退避重试；重启接收端 → **自动重连续流**，全程零人工（重连计数 14） |
 | 6 | 熄屏续流 | `input keyevent 26` 熄屏（`mWakefulness=Asleep`、`Display Power: state=OFF`）**75 秒**，14 条心跳满速无断档、欠采 0；`PARTIAL_WAKE_LOCK 'micbridge:up'` 确认持有 |
+| 7 | 长跑顺带观测 | 装机后链路连续跑了 **541 秒**（期间我反复重启接收端造成 **6 次重连**），速率仍 31676 B/s、水位 60–80ms；累计**欠载 126 次**。按 20ms 一块算约 27000 块，占比 **0.47%**，且怀疑主要来自每次重连后的水位重建期（**没做"纯稳态长跑"的对照，别当成稳态指标**）；30 分钟 soak 仍未跑 |
 
 ## 7. 没做到的 / 待办
 
@@ -136,7 +137,7 @@ python pc_receiver.py --record 34   # 录下 CABLE Output，再丢给 ASR
 | **VB-Cable 虚拟声卡**（核心依赖） | 卸载 `VBCABLE_Setup_x64.exe /u` 或设备管理器删 `ROOT\MEDIA\0000`，卸载需重启 |
 | **adb** winget `Google.PlatformTools` r37.0.1 | `winget uninstall Google.PlatformTools` |
 | 工具链 **`C:\android-build\`**（jdk17 / android-14=build-tools r34 / android-5.0.1=平台21） | 整目录可直接删 |
-| venv `E:\github项目\jiushouji-yuyin-gaizao-build\venv`（sounddevice 0.5.6 + numpy） | 删目录；另有下载剩的 3 个 zip 约 370MB 可清 |
+| venv `E:\github项目\jiushouji-yuyin-gaizao-build\venv`（sounddevice 0.5.6 + numpy） | 71MB，**当前后台接收端进程用的就是它**；仓库内另有 `.venv`（`setup_windows.ps1` 在新机器上建的就是这个）。临时下载的 3 个安装包 zip 已删（298MB，工具链已解压到 `C:\android-build`，需要时可重下） |
 | 平板装了 `com.zcstudy.micbridge` v0.3.2；`/sdcard/Music/` 未改动 | `adb uninstall com.zcstudy.micbridge` |
 | 为识别测试启动过 CapsWriter `start_server.exe` | **已 taskkill 停掉**，6016 端口已释放 |
 | `%USERPROFILE%\.android\adbkey*` 被我备份后重生成过 | 旧密钥在 `~/.android/backup-1793325989/`；换密钥会让平板上的旧授权失效，需重新点「允许」 |
