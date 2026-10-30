@@ -90,6 +90,10 @@ def main():
     ap.add_argument("--branch", default="main")
     ap.add_argument("--repo", default=OWNER_REPO or None)
     ap.add_argument("--dry", action="store_true", help="只报告要推什么，不动远端")
+    ap.add_argument("--base", default=None,
+                    help="把这些提交挂到指定远端提交下面重建历史（用于纠正已推坏的分支）")
+    ap.add_argument("--force-ref", action="store_true",
+                    help="移动分支时允许非快进（重建历史后必须加）")
     a = ap.parse_args()
 
     repo = a.repo or repo_from_remote()
@@ -108,32 +112,44 @@ def main():
 
     blob_cache = {}
     parent = []
-    try:                                 # 远端分支已存在 -> 从它的 HEAD 接着长，并跳过重推
-        head = api("GET", "/repos/%s/commits/%s" % (repo, a.branch), tok)
-        parent = [head["sha"]]
-        have = set()
-        for cc in api("GET", "/repos/%s/commits?per_page=100&sha=%s" % (repo, a.branch), tok):
-            have.add(cc["commit"]["message"].splitlines()[0])
-        keep = [c for c in commits
-                if sh("git", "log", "-1", "--format=%s", c).strip() not in have]
-        print("远端已有 %s，跳过重推 %d 个提交" % (parent[0][:8], len(commits) - len(keep)))
-        commits = keep
-        if not commits:
-            print("没有需要推的提交")
-            return 0
-    except RuntimeError as e:
-        if not is_empty_repo(e):
-            raise
-        parent = [bootstrap(repo, tok, commits[0])]
+    if a.base:
+        parent = [a.base]
+        print("按 --base 从 %s 重建整条历史（%d 个提交），不做去重跳过"
+              % (a.base[:8], len(commits)))
+    else:
+        try:                             # 远端分支已存在 -> 从它的 HEAD 接着长，并跳过重推
+            head = api("GET", "/repos/%s/commits/%s" % (repo, a.branch), tok)
+            parent = [head["sha"]]
+            have = set()
+            for cc in api("GET", "/repos/%s/commits?per_page=100&sha=%s" % (repo, a.branch), tok):
+                have.add(cc["commit"]["message"].splitlines()[0])
+            keep = [c for c in commits
+                    if sh("git", "log", "-1", "--format=%s", c).strip() not in have]
+            print("远端已有 %s，跳过重推 %d 个提交" % (parent[0][:8], len(commits) - len(keep)))
+            commits = keep
+            if not commits:
+                print("没有需要推的提交")
+                return 0
+        except RuntimeError as e:
+            if not is_empty_repo(e):
+                raise
+            parent = [bootstrap(repo, tok, commits[0])]
 
     for c in commits:
         entries = []
         fresh = 0
-        for ln in sh("git", "ls-tree", "-r", c).splitlines():
-            meta, path = ln.split("\t", 1)
-            mode, typ, sha = meta.split()
+        # 必须用 -z：默认模式下 git 会把非 ASCII 路径八进制转义并**连引号一起**输出，
+        # 拿它当文件名建 tree，远端就会出现字面叫 "\345\220\257..." 的乱码文件。
+        raw_tree = subprocess.run(["git", "ls-tree", "-r", "-z", c],
+                                  capture_output=True, check=True).stdout
+        for rec in raw_tree.split(b"\0"):
+            if not rec:
+                continue
+            meta, path_b = rec.split(b"\t", 1)
+            mode, typ, sha = meta.decode("utf-8").split()
+            path = path_b.decode("utf-8")
             if typ != "blob":
-                raise RuntimeError("暂不支持非 blob 条目：" + ln)
+                raise RuntimeError("暂不支持非 blob 条目：" + path)
             if sha in blob_cache:
                 entries.append({"path": path, "mode": mode, "type": "blob",
                                 "sha": blob_cache[sha]})
@@ -163,10 +179,13 @@ def main():
     # 坑：git/ref 和 git/refs 这两个端点要传 heads/<branch>，
     # 传 refs/heads/<branch> 会 404，然后被误判成"分支不存在"去走创建，再撞 422 already exists
     short = "heads/" + a.branch
+    patch = {"sha": parent[0]}
+    if a.force_ref:
+        patch["force"] = True            # 用 --base 重建历史后必然非快进
     try:
         api("GET", "/repos/%s/git/ref/%s" % (repo, short), tok)
-        api("PATCH", "/repos/%s/git/refs/%s" % (repo, short), tok, {"sha": parent[0]})
-        print("分支 %s 已前移到 %s" % (ref, parent[0][:8]))
+        api("PATCH", "/repos/%s/git/refs/%s" % (repo, short), tok, patch)
+        print("分支 %s 已%s移到 %s" % (ref, "强" if a.force_ref else "前", parent[0][:8]))
     except RuntimeError as e:
         if not is_empty_repo(e) and "not found" not in str(e).lower():
             raise
