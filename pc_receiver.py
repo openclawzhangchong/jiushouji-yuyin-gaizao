@@ -141,6 +141,14 @@ def main():
         if d < st["water"] and d < st["max_water"]:
             outdata[:, 0] = 0
             return
+        # 弹性追赶：平板声卡时钟和电脑声卡时钟有约 0.1% 的偏差（实测 5 分钟水位从
+        # 320ms 漂到 620ms），不处理的话延迟会一路爬到 max_water 才被一刀切掉。
+        # 高出目标一截时每次回调多丢一块（20ms），用轻微且不连续的可闻损失换延迟不再漂。
+        if st["client"] is not None:
+            with lock:
+                while len(buf) > 1 and depth_ms() > st["water"] + 120.0:
+                    buf.popleft()
+                    st["drop"] += 1
         got = 0
         while got < frames:
             with lock:

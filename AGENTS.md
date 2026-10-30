@@ -168,6 +168,7 @@ node E:/github项目/yuyin-shuru-trial/test/ws-transcribe.mjs verify.wav zh
 | 39 | **不要在监听地址不含回环时下发 `adb reverse`**。一旦下发，设备上就有一个"假装能连"的回环桩，App 每轮都先撞上它、1 秒后 EPIPE，**永远轮不到 WiFi** | `pc_receiver.py` 仅在 `--bind ∈ {auto, 127.0.0.1, 0.0.0.0}` 时下发 reverse |
 | 40 | accept 里写了 `conn, _ = srv.accept()` 却把 `addr` 传给 reader → **`NameError` 让线程静默死掉**，主循环日志照刷，表面完全正常 | 见"日志在动但连接数为 0"，第一件事是 `grep "Exception in thread"`，不要去怀疑网络 |
 | 41 | `recv(65536)` 等于**一口吞下 2 秒音频**，预缓冲被直接顶到 640ms（目标本是 250ms） | 单次读上限 `--recv-bytes 3200`（=100ms）；改完水位实测 **300-340ms** |
+| 45 | **平板声卡与电脑声卡时钟有约 0.1% 偏差**：只设预缓冲不追赶的话，5 分钟水位从 320ms 漂到 620ms，最后被 `max_water` 一刀切掉 700ms 音频 | 回调里做**弹性追赶**：水位超过 `water+120ms` 就每次多丢一块（20ms）。实测 247 秒水位稳在 280-360ms，代价 156 次×20ms≈总音频 1.3%（多为 WiFi 打嗝后 TCP 突发补货所致）。**宁可丢 20ms 也不让延迟永久台阶上升** |
 | 42 | **WiFi 模式必须放行 Windows 入站 TCP:5005**，否则接收端只会一直"等设备连"，看不出任何报错 | `setup_windows.ps1 -Go -Firewall`；规则名 `mic-bridge-receiver-5005`；删除：`netsh advfirewall firewall delete rule name=mic-bridge-receiver-5005` |
 | 43 | **不设 `SO_REUSEADDR`**。Windows 上它允许静默重复绑定同一端口，于是出现"两个接收端同时在跑，一个真收、一个空转刷日志"，排查时被误导成"链路坏了" | 已去掉，并保留启动前端口探测（`connect_ex`） |
 | 44 | `taskkill` 掉正在服务 adb 连接的接收端，会把 **adbd 打回 `offline`**，之后拔插/复位才恢复 | 优先用 Ctrl-C 让它走 `finally` 正常收尾；脚本已把 `adb reverse --remove-all` 收敛为"只有装了 adb 才执行" |
@@ -182,6 +183,11 @@ pyinstaller --onefile --console --name mic-bridge-receiver pc_receiver.py
 - **必须用 `--list` 验一次**：能列出 CABLE 设备才说明 PortAudio 的 DLL 被正确打包
   （PyInstaller 打音频程序最容易在这一步静默失败）。
 - **EXE 不进 git**（`dist/` 已在 `.gitignore`），走 **GitHub Release** 分发。
+- 重新构建前**必须先杀掉正在跑的旧 EXE**，否则 PyInstaller 报 `PermissionError` 写不进 `dist/`
+  而**构建脚本不会中断**，你会误以为"我刚重新构建过"其实跑的是旧二进制 —— 判据只有产物字节数 + sha256。
+- 更新 Release 资产用 `gh release upload <tag> <file> --clobber`；
+  **`--overwrite` 这个参数不存在，会静默不上传**（远端 sha 仍是旧的）。
+  上传完必须回读 `releases/latest` 的 `.assets[].size / .digest` 对一遍才算数。
 - 远端那台电脑**没有 adb 也不需要 adb**：`find_adb()` 找不到就跳过 reverse，
   `--bind auto` 会自动改绑 `0.0.0.0` 进入纯 WiFi 模式。
 

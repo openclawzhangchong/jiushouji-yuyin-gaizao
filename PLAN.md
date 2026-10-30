@@ -237,9 +237,24 @@ adb 坑）留在设备仓库；"怎么在新电脑上重建这套东西"全归�
 
 ### PC 端 EXE
 
-`dist/mic-bridge-receiver.exe`，21,075,839 字节，
-SHA-256 `d4d1aabb986ed5a7e069b6eb4decd77674abb431c2b2414102ccebcdcfa30d20`。
-构建命令与必验步骤（`--list` 必须能列出 CABLE 设备，否则 PortAudio 没打进去）写在 AGENTS.md 第 6 节。
-EXE 不进 git，走 GitHub Release。
+`dist/mic-bridge-receiver.exe`（GitHub Release `v0.5.0` 上的最终版）
+**21,075,491 字节，SHA-256 `42e7fdeb4e4ec60d1f5072dc20855eb85bfee6b05258da709506ee501db90d2a`**。
+
+> 发布踩坑两条，都真实发生过：
+> 1. **旧 EXE 在跑时 PyInstaller 会 `PermissionError` 写不进 dist**，但脚本不中断，
+>    于是我一度把"新启动的进程"当成了新构建 —— 判据是先核对产物**字节数与 sha256**，别信"我刚重新构建过"。
+> 2. `gh release upload --overwrite` 这个参数不存在，会静默不上传（远端仍是旧 sha），
+>    正确参数是 **`--clobber`**；上传后必须回读 `releases/latest` 的 `.assets[].size/.digest` 对一遍。
+
+同一 Release 里的 `mic-bridge-0.5.0.apk`：20,890 字节，
+SHA-256 `3cffc2b0438df00ec38fef1619b70d5af55241ebdf50b86c2fcb4dac402c2b92`。
+
+### 时钟漂移与弹性追赶（最后补上的一处）
+
+只设预缓冲不追赶时，实测 **5 分钟水位从 320ms 漂到 620ms**（平板声卡与电脑声卡约 0.1% 时钟偏差），
+最后要靠 `max_water` 一刀切掉整段，延迟表现是"越用越慢然后突然跳一下"。
+改成回调里弹性追赶（超过 `water+120ms` 每次多丢一块 20ms）后：
+**连续 247 秒水位稳在 280-360ms**，代价 156 次丢块 ≈ 总音频 1.3%（多数来自 WiFi 打嗝后的 TCP 突发补货）。
+取代表：宁可丢 20ms 碎片，也不要延迟永久台阶上升。
 
 
