@@ -1,0 +1,25 @@
+# 沿用 jiushouji-adb-apk2027 的约定：统一换行符，避免脚本推到设备上或在本机跑不起来
+* text=auto eol=lf
+
+# 设备端/PC 端用 bash 执行的脚本必须是 LF（CRLF 会让 /system/bin/sh 与 bash 报错）
+*.sh text eol=lf
+
+# Windows 批处理与 PowerShell 保持 CRLF（cmd.exe 对 LF-only 不稳）
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 源码与文档
+*.java text eol=lf
+*.kt text eol=lf
+*.xml text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+
+# 二进制
+*.png binary
+*.jpg binary
+*.apk binary
+*.idsig binary
+*.wav binary
+*.mp4 binary

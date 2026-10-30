@@ -1,0 +1,162 @@
+# 旧平板做电脑语音输入麦克风 —— 决策与实测台账
+
+> 本文件是运行中的决定日志，每条结论都带实测出处。改架构前先读这里。
+> 建档 2026-10-30 上午（可行性 Spike）→ 当日中午完工（v0.3.2 已装机、链路在跑）。
+
+## 0. 目标与结论
+
+把手边这台旧安卓设备当**麦克风**，让 Windows 出现一个可用的录音设备，
+任何程序（微信/QQ 语音、网页语音输入、Win+H、CapsWriter）都能当普通麦克风选它。
+
+**已经做出来了。** 平板采麦 → USB(adb reverse) → PC 接收端 → VB-Cable → Windows 麦克风
+`CABLE Output` → 已知中文被 Qwen3-ASR **逐字认出**。熄屏续流、断线自连都验过。
+
+## 1. 设备事实
+
+插着的这台 = `jiushouji-adb-apk2027` 记录的那台，**同一台**：
+序列号 `0123456789ABCDEF`、`product:full_b906`、`model:XXB` 全部对上。
+
+| 项 | 值 |
+|---|---|
+| 形态 | 7 寸**平板**（不是手机），MTK **MT6582** 4×Cortex-A7 @1.3GHz |
+| 系统 | Android **5.1 / API 21**，无 root、无 Google 服务，SELinux permissive |
+| ABI | 仅 `armeabi-v7a`；`adb shell getprop ro.build.version.sdk` = 21 复核 |
+| 麦克风 | 好。用户 2026-10-30 中午用录音机手动录过；本轮又被声学自测二次确认 |
+| 外放 | 好（自测靠它）。`/sdcard/Music/` 里还留着上次的 `loop1.wav.off / loop2.wav.off / loop3.wav` |
+| 供电 | `USB powered: true`，一根线同时供电+走数据 |
+| 网络 | 和 PC **不同网段**（PC 有线 192.168.168.250，平板记录过 192.168.191.x）→ 这正是选 USB 的理由 |
+
+采麦参数不用猜，直接抄自己生产代码：
+`xiaole-ptt-android5-2027/src/com/zcstudy/xiaole/ptt/Audio.java:15-40`
+= `AudioRecord(VOICE_COMMUNICATION, 16000, CHANNEL_IN_MONO, ENCODING_PCM_16BIT)`。
+
+## 2. 唯一的真卡点（已解除）：这台电脑原来一个录音设备都没有
+
+只有 3 个**渲染**端点，capture 端点为 0。所以这些路都死：
+
+- ❌ 3.5mm 音频线接电脑 line-in —— 没有 line-in
+- ❌ 立体声混音 (Stereo Mix) —— 也是 capture 端点，不存在
+- ❌ 手机当蓝牙 HFP 耳机 —— Android 只能做 AG 角色
+- ❌ 手机做 USB Audio Class 设备 —— 要 kernel gadget + root
+
+**必须有虚拟声卡驱动，没有第二条路。**
+
+## 3. PC 侧可行性实测（Spike 数字，仍是有效结论）
+
+- 驱动：官方 `VBCABLE_Driver_Pack45.zip`，`vbaudio_cable64_win10.sys` DriverVer 2024-10-07，
+  签名 `Valid`、cat `Valid`，**装完免重启**。
+  ⚠️ **Pack43 是 2015 年老包，只有 win7 驱动，Win11 22631 装不上**（一开始就踩了）。
+- 端点：`CABLE Input`=渲染（往里灌），`CABLE Output`=capture（这就是麦克风），另有 `CABLE In 16 Ch`。
+- 纯音透传：灌 440Hz@0.25 → 录到 peak **0.2500** 分毫不衰减；1000Hz 对照低 4 个数量级（选择性 65–78dB）。
+- 分频带能量比 100-500 / 500-1k / 1k-2k / 2k-3.5k / 3.5k-6k Hz **全部 ≈1.000** → 频谱无损。
+- 延迟：DirectSound 默认档 330–340ms；**WDM-KS/MME + `latency=low` + block 320 → 143.9ms**；
+  block 再调小只增加欠载，不降延迟（大头是 PortAudio/WASAPI 缓冲预算，不是虚拟声卡）。
+
+## 4. 最终架构
+
+```
+[平板 b906]  AudioRecord 16k/mono/PCM16  →20ms分包→ TCP 127.0.0.1:5005
+                                                      ↑ adb reverse tcp:5005 tcp:5005
+[PC]  pc_receiver.py  TCP监听 → 弹性缓冲(目标60ms) → sounddevice 播进 CABLE Input
+                                                                     ↓
+        Windows 麦克风「CABLE Output」 ← 任何程序可选；CapsWriter 走系统默认输入
+```
+
+**选 USB 不选 WiFi** 的理由：平板和 PC 根本不在一个网段；一根线还顺便供电。
+App 只连自己的 `127.0.0.1:5005`，靠 `adb reverse` 把它搬到 PC 上，平板不需要开监听端口。
+
+## 5. 交付物
+
+| 文件 | 作用 |
+|---|---|
+| `app/AndroidManifest.xml` | 权限 RECORD_AUDIO/INTERNET/WAKE_LOCK/READ_EXTERNAL_STORAGE；minSdk 21 |
+| `app/src/.../Bridge.java` | 采麦+分包+TCP 推流+退避重连+PARTIAL_WAKE_LOCK+5s 心跳日志+标定音注入 |
+| `app/src/.../MainActivity.java` | 全程序化 UI（大开关/28段电平/状态行/标定音/外放自测/音源切换），intent 无人值守 |
+| `build.sh` | 无 Gradle 出包链，沿用 ptt 版流程与自证检查 |
+| `pc_receiver.py` | adb reverse 管理 + TCP 收流 + 弹性缓冲 + 播进 CABLE Input + 状态打印 + 可选同时录音 |
+| `acoustic_probe.py` `look.py` | 声学回环与包络/频谱分析（`look.py` 读 verify.wav） |
+| `run_selftest.sh` | 无人值守回归一条命令 |
+| `setup_windows.ps1` | **新机一键部署**：adb + VB-Cable + .venv（`-WithBuild` 附带 APK 构建链）。默认 DRY-RUN，纯 ASCII（PS 5.1 会把无 BOM 的 UTF-8 读成 GBK） |
+| `README.md` | 入口：为什么只能走这条路、架构图、部署两步半、文件清单 |
+| `AGENTS.md` | **给接手 AI 的硬约束/禁止事项/必跑验收**，坑按"违反了会怎样"写 |
+| `docs/验收记录.md` | 验收数字与 ASR 原文 |
+| `spike/` | 丢弃型验证脚本 + `spike/README.md` 标明别当实现参考 |
+| `启动接收端.bat` | 双击启动（优先用仓库内 `.venv`） |
+| `acoustic_probe.py` `look.py` `spike/` | 验收脚本（spike/ 是丢弃型，结论已出可删） |
+| `release/mic-bridge-0.3.2.apk` | 当前装机版本 |
+
+### 用法
+
+```bash
+# 一次性：平板开 USB 调试并点「允许」；PC 已装 VB-Cable + adb
+python pc_receiver.py            # 常驻，关窗口即停；或双击 启动接收端.bat
+adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true   # 平板端自动开始送话
+# 或者在平板上直接点大按钮「开始送话」
+
+# 无人值守回归（含平板自己外放已知音频、自己听回来）
+adb shell am start -n com.zcstudy.micbridge/.MainActivity \
+    --ez auto true --es act selftest --es demo /sdcard/Music/loop2.wav.off
+python pc_receiver.py --record 34   # 录下 CABLE Output，再丢给 ASR
+```
+
+**要让 CapsWriter 用**：把 `CABLE Output` 设成 Windows **默认录音设备**即可，
+它 `core/client/audio/stream.py:115` 取的就是默认输入（`device=None`），不用改代码。
+它按 `min(2, 声道数)` 开 2 声道，而 VB-Cable 会把单声道复制到两路，
+所以幅度不丢（实测 2ch 录到 peak 仍等于灌入值）。
+
+## 6. 验收结果（2026-10-30 中午，全部在真机跑）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | 字节率 | 心跳侧 **31852–32640 B/s**（满速 32000），接收端同量级；**欠采 0、丢块 0**，长时间稳定 |
+| 2 | 水位 | 40–140ms 区间来回，不持续增长；**弹性缓冲不失效** |
+| 3 | **真语音识别** | 平板外放已知中文 → 自己麦克风采 → USB → CABLE Output 录下 → Qwen3-ASR：「Hello 啊，我是小智啦。声音好听的台湾女孩一枚，超开心认识你耶。最近在忙啥？别忘了给我来点有趣的料哦！」 **逐字正确**，服务端处理 1644ms |
+| 4 | 声学有效性 | verify.wav 包络：0–5s = -97dBFS 数字静音；**7–16s 平均 -8.7dBFS、峰值 -3.3dB**；17s 后回落 -50dB 底噪。频谱 1000-2000Hz 最强，是语音形状 |
+| 5 | 断线自恢复 | 杀掉接收端 → App 退避重试；重启接收端 → **自动重连续流**，全程零人工（重连计数 14） |
+| 6 | 熄屏续流 | `input keyevent 26` 熄屏（`mWakefulness=Asleep`、`Display Power: state=OFF`）**75 秒**，14 条心跳满速无断档、欠采 0；`PARTIAL_WAKE_LOCK 'micbridge:up'` 确认持有 |
+
+## 7. 没做到的 / 待办
+
+- **端到端绝对延迟没实测**。只测了 Windows 段 143.9ms（§3，同设备同参数），
+  加平板侧 20ms 分块 + USB ≈1ms + 接收端水位 40–140ms，**估 160–300ms**。
+  要出准数需要平板与 PC 的跨机时钟对齐，`adb shell date` 往返延迟太粗（几百 ms），撑不起 ±30ms 的结论。
+  对听写/语音输入这个用途延迟不敏感，所以没优先做。
+- 熄屏只连续验了 **75 秒**，没跑 30 分钟 soak。
+- **开机自启 / 常驻不被杀**：现在靠手动点按钮或 `am start`。要真正无人值守，
+  下一步接 `BOOT_COMPLETED` +（你那套 Kiosk 已验证可行的）Device Owner/LockTask。
+- 没做平板侧掉线提示音/界面告警（现在只有状态行文字）。
+- 音源 A/B：现默认 `VOICE_COMMUNICATION`（沿用你验证过的配置），
+  界面有按钮可切 `VOICE_RECOGNITION` 对比 MTK 回声处理的影响，**没正式对比过**。
+- `spike/` 是丢弃型验证脚本，别当实现参考。
+
+## 8. 本机环境变更（都可回退）
+
+| 变更 | 位置 / 回退 |
+|---|---|
+| **VB-Cable 虚拟声卡**（核心依赖） | 卸载 `VBCABLE_Setup_x64.exe /u` 或设备管理器删 `ROOT\MEDIA\0000`，卸载需重启 |
+| **adb** winget `Google.PlatformTools` r37.0.1 | `winget uninstall Google.PlatformTools` |
+| 工具链 **`C:\android-build\`**（jdk17 / android-14=build-tools r34 / android-5.0.1=平台21） | 整目录可直接删 |
+| venv `E:\github项目\jiushouji-yuyin-gaizao-build\venv`（sounddevice 0.5.6 + numpy） | 删目录；另有下载剩的 3 个 zip 约 370MB 可清 |
+| 平板装了 `com.zcstudy.micbridge` v0.3.2；`/sdcard/Music/` 未改动 | `adb uninstall com.zcstudy.micbridge` |
+| 为识别测试启动过 CapsWriter `start_server.exe` | **已 taskkill 停掉**，6016 端口已释放 |
+| `%USERPROFILE%\.android\adbkey*` 被我备份后重生成过 | 旧密钥在 `~/.android/backup-1793325989/`；换密钥会让平板上的旧授权失效，需重新点「允许」 |
+| 当前仍在后台跑着 `pc_receiver.py` | 关窗口 / `taskkill /IM python.exe` 会连链路一起停 |
+
+## 9. 踩坑记录（下次别再踩）
+
+- **VB-Cable 只能用 Pack45 及以上的 win10 驱动**，Pack43 只到 win7。
+- **aapt2 stat 不到中文路径里的 android.jar**：`E:/github项目/...` 会报 No such file or directory。
+  工具链必须整体放纯 ASCII 路径（这台放 `C:\android-build`，正好和你另一台的 `D:/android-build` 同构）。
+- `am start --ez` **只认 `true`/`false`**；写 `--ez auto 1` 会被解析成 **false**，
+  表现为"App 起来了但什么都没发生"。已让 App 见到 `act` 参数就自动启动来兜这个坑。
+- **Android 5.1 的 adbd 不支持 `adb reverse --list`**（`error: protocol fault`），
+  但 `adb reverse tcp:x tcp:x` / `--remove-all` 正常。所以隧道存活只能靠
+  "设备在位 + 无客户端"来重新下发，不能查 list。
+- PortAudio 设备名被截到 32 字符（`'CABLE Output (VB-Audio Virtual '`），匹配要用包含不是相等。
+- `sd.query_devices()` 0.5.6 返回 **dict**，取属性 `AttributeError`。
+- PowerShell 5.1 装不动 NAudio 的 netstandard2.0 包；最新 NAudio 只发 net9.0 更不行。
+  要 .NET 做音频得锁 NAudio 2.2.1，或干脆用 Python+sounddevice（和 CapsWriter 同栈，本次选择）。
+- Python 输出重定向到文件是全缓冲，日志要实时可见得开 `line_buffering`。
+- 比较"经过虚拟麦的音频"时，**比较区间必须卡在实际发送的秒数内**并用冲激先定位，
+  否则拿后半段静音比语音会得出 r=0.03 的假阴性。
+- 接收端收尾时 `srv.close()` 会让 `accept()` 抛 `WinError 10038`，要 catch。

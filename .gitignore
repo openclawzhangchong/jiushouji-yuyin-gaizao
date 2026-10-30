@@ -1,0 +1,22 @@
+# 构建产物
+out/
+mic-bridge.apk
+mic-bridge.apk.idsig
+*.idsig
+
+# release/ 里只留版本化的正式包（同 xiaole-ptt 仓库的做法）
+!release/*.apk
+
+# 验收音频（体积大，结论已写进 docs/）
+verify.wav
+spike/captured_mic.wav
+out_*.log
+
+# 本机环境与依赖
+.venv/
+__pycache__/
+*.pyc
+micbridge.keystore
+
+# 本机临时抓取物（空目录，git 本也不跟踪）
+artifacts/
