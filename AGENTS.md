@@ -78,6 +78,13 @@
 | 33 | Git Bash 里 `adb shell` 的**远程**路径会被 MSYS 改写 | 远程路径前加 `MSYS_NO_PATHCONV=1`；但这样本地路径就得写 `E:/...` 的 Windows 形式 |
 | 34 | 接收端收尾时 `srv.close()` 会让 `accept()` 抛 `WinError 10038` | 已 catch，别改成裸奔 |
 
+### 推送 / 网络（本环境）
+
+| # | 陷阱 | 正确做法 |
+|---|---|---|
+| 35 | 这台机器 **`github.com` 的 443 上行不稳**：`git push` 报 `curl 55 Send failure: Connection was reset` 或连接超时，而 **`api.github.com` 只要 0.28 秒** | 别反复重试 `git push`，也别为此改 git config。用 **Git Data API 一次性提交**：`git/blobs` → `git/trees` → `git/commits`（按 `git log --reverse` 顺序，parents 串起来）→ `git/refs`。参考实现见仓库历史里的做法，或直接用 `gh api` 手写四轮 |
+| 36 | `hosts` 里可能有手工 pin 的 `github.com` IP（本机由 `Fix-GitHubHosts.ps1` 于 2026-10-29 写入） | **先分清是"IP 过期"还是"上行被 RST"**：用 `--resolve` 测官方 IP（注意 `gh api meta` 返回的是**网段**，如 `140.82.112.0/20`，基址不可用，要取真实 A 记录），再看 `api.github.com` 是否秒回。本例是后者，动 hosts 没用 |
+
 ---
 
 ## 3. 禁止事项
