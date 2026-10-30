@@ -160,11 +160,16 @@ def main():
         time.sleep(0.3)
 
     ref = "refs/heads/" + a.branch
+    # 坑：git/ref 和 git/refs 这两个端点要传 heads/<branch>，
+    # 传 refs/heads/<branch> 会 404，然后被误判成"分支不存在"去走创建，再撞 422 already exists
+    short = "heads/" + a.branch
     try:
-        api("GET", "/repos/%s/git/ref/%s" % (repo, ref), tok)
-        api("PATCH", "/repos/%s/git/refs/%s" % (repo, ref), tok, {"sha": parent[0]})
+        api("GET", "/repos/%s/git/ref/%s" % (repo, short), tok)
+        api("PATCH", "/repos/%s/git/refs/%s" % (repo, short), tok, {"sha": parent[0]})
         print("分支 %s 已前移到 %s" % (ref, parent[0][:8]))
-    except RuntimeError:
+    except RuntimeError as e:
+        if not is_empty_repo(e) and "not found" not in str(e).lower():
+            raise
         api("POST", "/repos/%s/git/refs" % repo, tok, {"ref": ref, "sha": parent[0]})
         print("已创建 %s -> %s" % (ref, parent[0][:8]))
 
