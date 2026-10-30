@@ -187,7 +187,12 @@ adb 坑）留在设备仓库；"怎么在新电脑上重建这套东西"全归�
 3. `git/ref` 与 `git/refs` 端点要传 `heads/<branch>`；传 `refs/heads/<branch>` 会 404，
    脚本会误判成"分支不存在"去走创建，再撞 `422 Reference already exists`。
 
-本地 `main` 与 `origin/main` 已对齐：tree hash 完全一致（`08580c1b…`），
-远端只多出那个空库 bootstrap 占位提交。构建链的 keystore 在 `C:\android-build\micbridge.keystore`
+本地 `main` 与远端的**内容**逐字节一致（tree hash 相同，例：`cf9ddfd1…`），
+但 **commit SHA 必然不同** —— 远端父链多一个空库 bootstrap 提交，而本地 `git fetch`
+走不通 github.com，所以本地 `origin/main` 引用会停在旧值、`git status` 显示 ahead 1。
+**这不是没推上去**：判成败要比 tree hash，不要比 SHA；
+也别用 `git update-ref` 硬把跟踪引用指到远端 SHA，那个对象本地不存在，会直接报错。
+等 github.com 可用时再 `git fetch` + `git diff --stat HEAD origin/main`（应为空）+ `git reset --hard origin/main` 对齐历史形状。
+构建链的 keystore 在 `C:\android-build\micbridge.keystore`
 （口令 `android`，Android 调试标准口令，非机密），`.gitignore` 已排除。
 

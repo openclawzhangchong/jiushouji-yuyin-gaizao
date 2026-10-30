@@ -197,6 +197,13 @@ def main():
     print("  " + head["sha"][:8] + "  " + head["commit"]["message"].splitlines()[0])
     print("  文件数 %d" % len(api("GET", "/repos/%s/git/trees/%s?recursive=1"
                                   % (repo, head["sha"]), tok)["tree"]))
+    print("\n注意：API 推送出来的 commit SHA 与本地不同（远端父链多一个 bootstrap 提交），"
+          "而本地 fetch 走不通 github.com，所以 origin/main 跟踪引用会是旧值、"
+          "git status 显示 ahead。")
+    print("判成败比 tree hash，不比 SHA：")
+    print("  gh api repos/%s/commits/main --jq '.commit.tree.sha'" % repo)
+    print("  git rev-parse 'HEAD^{tree}'      # 两者相同即内容已上去")
+    print("不要用 git update-ref 硬指远端 SHA —— 那个对象本地不存在，会报错。")
     return 0
 
 
