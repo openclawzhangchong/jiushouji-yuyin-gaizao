@@ -60,6 +60,31 @@ def repo_from_remote():
     sys.exit("找不到 github.com 的 push remote，或设 PUSH_REPO=owner/name")
 
 
+def is_empty_repo(e):
+    return "Git Repository is empty" in str(e)
+
+
+def bootstrap(repo, tok, first_commit):
+    """GitHub 的 Git Data API 对完全空库一律返 409，必须先用 Contents API 造出第一个提交。
+    这一步会在远端多出一个只含 README 的占位提交，属正常代价。"""
+    files = sh("git", "ls-tree", "-r", "--name-only", first_commit).split("\n")
+    readme = None
+    for cand in ("README.md",) + (".gitignore",):
+        if cand in files:
+            readme = cand
+            break
+    if readme is None:
+        raise RuntimeError("空库 bootstrap 需要一个 README.md 或 .gitignore 作为首个提交的文件")
+    raw = subprocess.run(["git", "show", "%s:%s" % (first_commit, readme)],
+                         capture_output=True, check=True).stdout
+    body = {"message": "建仓占位：先提交 %s（GitHub Git Data API 不接受空库）" % readme,
+            "content": base64.b64encode(raw).decode()}
+    r = api("PUT", "/repos/%s/contents/%s" % (repo, readme), tok, body)
+    sha = r["commit"]["sha"]
+    print("  空库已 bootstrap，首个提交 %s" % sha[:8])
+    return sha
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--branch", default="main")
@@ -83,6 +108,24 @@ def main():
 
     blob_cache = {}
     parent = []
+    try:                                 # 远端分支已存在 -> 从它的 HEAD 接着长，并跳过重推
+        head = api("GET", "/repos/%s/commits/%s" % (repo, a.branch), tok)
+        parent = [head["sha"]]
+        have = set()
+        for cc in api("GET", "/repos/%s/commits?per_page=100&sha=%s" % (repo, a.branch), tok):
+            have.add(cc["commit"]["message"].splitlines()[0])
+        keep = [c for c in commits
+                if sh("git", "log", "-1", "--format=%s", c).strip() not in have]
+        print("远端已有 %s，跳过重推 %d 个提交" % (parent[0][:8], len(commits) - len(keep)))
+        commits = keep
+        if not commits:
+            print("没有需要推的提交")
+            return 0
+    except RuntimeError as e:
+        if not is_empty_repo(e):
+            raise
+        parent = [bootstrap(repo, tok, commits[0])]
+
     for c in commits:
         entries = []
         fresh = 0
