@@ -7,9 +7,20 @@ Windows 因此多出一个叫 CABLE Output 的麦克风，任何程序都能选�
   python pc_receiver.py --list          # 看设备索引
   python pc_receiver.py --record 10     # 顺手从 CABLE Output 录 10s 存 verify.wav
 """
-import argparse, collections, glob, os, re, socket, subprocess, sys, threading, time, wave
+import argparse, collections, glob, os, re, shutil, socket, subprocess, sys, threading, time, wave
 import numpy as np
 import sounddevice as sd
+import pystray
+from PIL import Image, ImageDraw
+
+# Windows 控制台/重定向默认按 GBK 编码。adb 的输出里一旦出现 UTF-8 解码后的替换字符
+# （中文路径、乱码、非 GBK 字符），print 会抛 UnicodeEncodeError 把整个接收端弄挂。
+# 宁可打问号也不能死：音频线程不能因为一行日志崩掉。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 try:
     sys.stdout.reconfigure(line_buffering=True)   # 重定向到文件/窗口都要即时可见
@@ -18,22 +29,106 @@ except Exception:
 
 SR = 16000
 PORT = 5005
+APP_VER = "0.6.0"
 PONG = b"P"                          # 协议：每 2 秒回写 1 字节，平板 6 秒收不到就重选链路
 PONG_EVERY = 2.0
 GAP_MS = 50.0                        # 包间隔超过这个值算一次"网络打嗝"
 PKG = "com.zcstudy.micbridge"
 ACTIVITY = PKG + "/.MainActivity"
-ADB_CANDIDATES = [
-    os.path.expandvars(
-        r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
-        r"\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe\platform-tools\adb.exe"),
-    "adb",
-]
 HERE = os.path.dirname(os.path.abspath(__file__))
+APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "mic-bridge")
+LOG_PATH = os.path.join(APPDIR, "receiver.log")
+
+
+class _Tee:
+    """print 同时进控制台和日志文件；windowless 打包里 stdout 是 None，只进文件。
+    reconfigure/flush 都要透传，主程序开头那两段 reconfigure 才不炸。"""
+    def __init__(self, *streams):
+        self.streams = [s for s in streams if s is not None]
+
+    def write(self, s):
+        for x in self.streams:
+            try:
+                x.write(s)
+            except Exception:
+                pass
+        return len(s)
+
+    def flush(self):
+        for x in self.streams:
+            try:
+                x.flush()
+            except Exception:
+                pass
+
+    def reconfigure(self, **kw):
+        for x in self.streams:
+            try:
+                x.reconfigure(**kw)
+            except Exception:
+                pass
+
+
+def setup_log():
+    """诊断入口：托盘菜单弹出实时日志窗口，靠的就是这份文件。超 1MB 换 .old。"""
+    try:
+        os.makedirs(APPDIR, exist_ok=True)
+        if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > 1_000_000:
+            old = LOG_PATH + ".old"
+            if os.path.exists(old):
+                os.remove(old)
+            os.replace(LOG_PATH, old)
+        f = open(LOG_PATH, "a", buffering=1, encoding="utf-8", errors="replace")
+    except OSError:
+        return
+    sys.stdout = _Tee(sys.stdout, f)
+    sys.stderr = _Tee(sys.stderr, f)
+
+
+def bundled_adb():
+    """EXE 里内置的 platform-tools 先解到固定目录再跑。
+
+    不能直接从 sys._MEIPASS 跑：onefile 退出会删掉临时目录，而 adb server 是常驻进程，
+    下次启动时 server 还指着已删除的 adb.exe，表现成"莫名其妙的连不上"。
+    """
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    src = os.path.join(base, "platform-tools")
+    if not os.path.isfile(os.path.join(src, "adb.exe")):
+        return None
+    dst = os.path.join(APPDIR, "platform-tools")
+    try:
+        os.makedirs(dst, exist_ok=True)
+        for f in ("adb.exe", "AdbWinApi.dll", "AdbWinUsbApi.dll"):
+            s, d = os.path.join(src, f), os.path.join(dst, f)
+            if not os.path.exists(s):
+                continue
+            if not os.path.exists(d) or os.path.getsize(s) != os.path.getsize(d):
+                shutil.copy2(s, d)
+    except OSError:
+        return None
+    return os.path.join(dst, "adb.exe")
+
+
+def adb_candidates():
+    out = []
+    b = bundled_adb()
+    if b:
+        out.append(b)
+    out += [
+        os.path.expandvars(
+            r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
+            r"\Google.PlatformTools_Microsoft.Winget.Source_8wekyb3d8bbwe\platform-tools\adb.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"),
+        os.path.expandvars(r"%USERPROFILE%\AppData\Local\Android\Sdk\platform-tools\adb.exe"),
+        os.path.expandvars(r"%ProgramFiles%\platform-tools\adb.exe"),
+        r"C:\platform-tools\adb.exe",
+        "adb",
+    ]
+    return out
 
 
 def find_adb():
-    for c in ADB_CANDIDATES:
+    for c in adb_candidates():
         try:
             subprocess.run([c, "version"], stdout=subprocess.DEVNULL,
                            stderr=subprocess.DEVNULL, timeout=8, check=True)
@@ -41,6 +136,23 @@ def find_adb():
         except Exception:
             continue
     return None
+
+
+def adb_has_device(adb):
+    """adb 存在 ≠ 插着平板。
+
+    EXE 现在内置 adb，如果还按“找得到 adb”判断，纯 WiFi 那台电脑会永远绑 127.0.0.1，
+    平板连不进来且没有任何报错。必须看 `adb devices` 里有没有真的 `device`。
+    """
+    if not adb:
+        return False
+    try:
+        p = subprocess.run([adb, "devices"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=12,
+                           encoding="utf-8", errors="replace")
+    except Exception:
+        return False
+    return any(l.strip().endswith("\tdevice") for l in (p.stdout or "").splitlines())
 
 
 def run_adb(adb, *args):
@@ -109,6 +221,95 @@ def lan_ip():
         s.close()
 
 
+def run_tray(a, st, fatal, core=None, holder=None):
+    """托盘常驻：图标颜色=状态（绿推流/灰等待/红故障），悬浮提示一句话，右键菜单操作。
+    core 是音频主循环（在线程里跑）；fatal 非 None 表示起不来（红盘，只留日志和退出）。"""
+    holder = holder if holder is not None else {}
+    _imgs = {}
+
+    def img():
+        if fatal:
+            c = (216, 60, 60)
+        elif st["client"] is None:
+            c = (150, 150, 150)
+        else:
+            c = (30, 190, 70)
+        if c not in _imgs:
+            im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(im)
+            d.ellipse((8, 8, 56, 56), fill=c + (255,), outline=(25, 25, 25, 255), width=3)
+            _imgs[c] = im
+        return _imgs[c]
+
+    def mode():
+        return "USB" if a.bind == "auto" else "WiFi"
+
+    def text(item=None):
+        if fatal:
+            return "mic-bridge 故障: %s" % fatal
+        if st["client"] is None:
+            return "mic-bridge 等待平板连接 · %s 模式" % mode()
+        return "mic-bridge 推流中 · %s · %s 模式" % (st["link"].split(" <-")[0], mode())
+
+    def refresh():
+        ic = holder.get("icon")
+        if ic is None:
+            return
+        try:
+            ic.icon = img()
+            ic.title = text()
+            ic.update_menu()
+        except Exception:
+            pass
+
+    def on_switch(ic, item):
+        st["switching"] = True          # 新实例会自己重发 adb reverse，老实例别去删
+        new_bind = "auto" if a.bind != "auto" else "0.0.0.0"
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "--bind", new_bind]
+        else:
+            cmd = [sys.executable, os.path.abspath(__file__), "--bind", new_bind]
+        try:
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：不挂在新进程的控制台上
+            subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200, close_fds=True)
+        except OSError as e:
+            st["switching"] = False
+            print("!! 切换失败：%s" % e)
+            return
+        print("切换到 %s 模式，重启接收端" % ("USB" if new_bind == "auto" else "WiFi"))
+        st["alive"] = False
+        ic.stop()
+
+    def on_show_log(ic, item):
+        cmd = 'Get-Content -LiteralPath "%s" -Encoding UTF8 -Wait -Tail 80' % LOG_PATH
+        try:
+            subprocess.Popen(["cmd", "/c", "start", "mic-bridge 诊断日志", "powershell",
+                              "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+                             creationflags=0x08000000)
+        except OSError as e:
+            print("!! 打不开日志窗口：%s（日志文件在 %s）" % (e, LOG_PATH))
+
+    def on_exit(ic, item):
+        print("托盘退出")
+        st["alive"] = False
+        ic.stop()
+
+    menu = pystray.Menu(
+        pystray.MenuItem(text, None, enabled=False),
+        pystray.MenuItem("切换 USB ⇄ WiFi", on_switch,
+                         enabled=lambda item: not fatal),
+        pystray.MenuItem("显示诊断日志", on_show_log),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem("退出", on_exit),
+    )
+    icon = pystray.Icon("mic-bridge", img(), text(), menu)
+    holder["icon"] = icon
+    holder["refresh"] = refresh
+    if core is not None:
+        threading.Thread(target=core, daemon=True).start()
+    icon.run()
+
+
 def ensure_apk(adb, a, log=print):
     """手机不方便下 APK 时的兜底：检测到平板上没装/版本旧，就用 adb 直接把内置 APK 装上去，
     顺手把本机局域网 IP 通过 intent 推给平板，省掉手填那一步。"""
@@ -164,6 +365,7 @@ def pick(pattern, need_in, prefer=(1, 0, 3, 2)):
 
 
 def main():
+    setup_log()
     ap = argparse.ArgumentParser(description="旧平板 -> Windows 虚拟麦克风 接收端")
     ap.add_argument("--out", type=int, default=None, help="CABLE Input 的设备索引")
     ap.add_argument("--cap", type=int, default=None, help="CABLE Output 的索引（--record 用）")
@@ -193,6 +395,8 @@ def main():
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args()
 
+    print("mic-bridge 接收端 v%s（内置 adb / 单路取音 / WiFi 兜底）" % APP_VER)
+
     if a.list:
         for i, d in enumerate(sd.query_devices()):
             print("%2d  ha%d  in%d out%d  %s" % (i, d["hostapi"], d["max_input_channels"],
@@ -208,7 +412,27 @@ def main():
         ensure_apk(adb, a)
         return 0
 
-    out_idx, out_name = (a.out, "(指定)") if a.out is not None else pick("CABLE Input", False)
+    buf = collections.deque()
+    lock = threading.Lock()
+    st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True,
+              link="?", water=a.water, max_water=a.max_water,
+              last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0,
+              install_tried=False, switching=False)
+
+    if a.out is not None:
+        out_idx, out_name = a.out, "(指定)"
+    else:
+        try:
+            out_idx, out_name = pick("CABLE Input", False)
+        except SystemExit:
+            print("!! 没找到 CABLE Input —— VB-Cable 虚拟声卡没装，接收端没有地方可写。")
+            print("   VB-Cable 是捐赠软件，授权禁止随其它安装程序分发，必须单独装：")
+            print("   1) 打开 https://vb-audio.com/Cable/ 下载 VBCABLE_Driver_Pack45.zip")
+            print("   2) 解压后以管理员运行 VBCABLE_Setup_x64.exe")
+            print("   3) 装完设备立刻出现，不用重装本程序，重跑即可")
+            # 不退进程：红盘常驻托盘，用户看得见"坏了"，日志里留着原因
+            run_tray(a, st, fatal="没装 VB-Cable，没地方写音频（详见日志）", core=None)
+            return 4
     lat = None if a.latency == "default" else (
         a.latency if a.latency in ("low", "high") else float(a.latency))
 
@@ -225,13 +449,6 @@ def main():
               or "adb reverse tcp:%d tcp:%d 已下发" % (PORT, PORT))
     elif adb:
         print("（绑定 %s 不含回环，跳过 adb reverse —— 这是纯 WiFi 模式）" % a.bind)
-
-    buf = collections.deque()
-    lock = threading.Lock()
-    st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True,
-              link="?", water=a.water, max_water=a.max_water,
-              last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0,
-              install_tried=False)
 
     def depth_ms():
         return sum(len(x) for x in buf) * 1000.0 / SR
@@ -273,7 +490,7 @@ def main():
     def ponger(conn):
         """协议：每 2 秒回写 1 字节。平板 6 秒收不到就判定链路废掉并重选（USB/WiFi）。
         只写不读；写失败说明对端已经没了，退出线程即可。"""
-        while st["alive"] and st["client"] is conn:
+        while st["alive"]:
             time.sleep(PONG_EVERY)
             try:
                 conn.sendall(PONG)
@@ -283,19 +500,24 @@ def main():
 
     def reader(conn, addr):
         st["conns"] += 1
-        st["client"] = conn
+        is_current = st["client"] is conn
         loopback = addr[0] in ("127.0.0.1", "::1")
         if loopback:
-            st["link"] = "USB(adb reverse) <- %s" % addr[0]
-            st["water"], st["max_water"] = a.water, a.max_water
+            link = "USB(adb reverse) <- %s" % addr[0]
+            water, max_water = a.water, a.max_water
         else:
-            st["link"] = "WiFi <- %s" % addr[0]
+            link = "WiFi <- %s" % addr[0]
             if not a.no_lan_water:
-                st["water"] = a.water_lan
-                st["max_water"] = max(a.max_water_lan, a.water_lan * 2)
-        st["last_rx"] = 0.0        # 新链路：重新按当前水位攒缓冲
-        print("[%s] 平板已连上 %s  目标水位 %.0fms 上限 %.0fms"
-              % (time.strftime("%H:%M:%S"), st["link"], st["water"], st["max_water"]),
+                water, max_water = a.water_lan, max(a.max_water_lan, a.water_lan * 2)
+            else:
+                water, max_water = a.water, a.max_water
+        if is_current:
+            st["link"] = link
+            st["water"], st["max_water"] = water, max_water
+            st["last_rx"] = 0.0        # 新链路：重新按当前水位攒缓冲
+        print("[%s] %s连接 %s  目标水位 %.0fms 上限 %.0fms"
+              % (time.strftime("%H:%M:%S"), "已" if is_current else "旁路",
+                 link, water, max_water),
               flush=True)
         threading.Thread(target=ponger, args=(conn,), daemon=True).start()
         try:
@@ -303,6 +525,8 @@ def main():
                 data = conn.recv(a.recv_bytes)
                 if not data:
                     break
+                if st["client"] is not conn:
+                    continue          # 旁路连接：只排空，绝不混进音频
                 tnow = time.perf_counter()
                 if st["last_rx"]:
                     gap = (tnow - st["last_rx"]) * 1000.0
@@ -324,8 +548,9 @@ def main():
         except OSError:
             pass
         finally:
-            st["client"] = None
-            st["last_rx"] = 0.0
+            if st["client"] is conn:
+                st["client"] = None
+                st["last_rx"] = 0.0
             try:
                 conn.close()
             except OSError:
@@ -342,6 +567,13 @@ def main():
         print("!! 本机 %d 端口已经有进程在监听（多半是上一个接收端没退干净）。" % PORT)
         print("   先关掉旧的再起，否则新起的这个看着像在跑、其实一个连接都收不到。")
         print("   查占用： netstat -ano | findstr :%d" % PORT)
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                None, "mic-bridge 接收端已经在运行了。\n\n看屏幕右下角托盘图标（可能在 ^ 隐藏图标里）。",
+                "mic-bridge", 0x40)
+        except Exception:
+            pass
         return 3
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -353,18 +585,19 @@ def main():
         srv.bind((b, PORT))
         bind_desc = b
     else:
-        # auto 的含义随环境变：有 adb 就认定是"插线的那台电脑"，只绑回环，不动防火墙；
-        # 没有 adb 说明这台是"只走 WiFi 的那台电脑"，必须绑 0.0.0.0，否则平板根本连不进来。
-        if adb:
+        # auto 的含义随环境变：**插着设备**就认定是"插线的那台电脑"，只绑回环，不动防火墙；
+        # 没有设备说明这台是"只走 WiFi 的那台电脑"，必须绑 0.0.0.0，否则平板根本连不进来。
+        # 注意不能只看 adb 存不存在：EXE 内置了 adb，那样纯 WiFi 电脑会永远误判成 USB 模式。
+        if adb_has_device(adb):
             try:
                 srv.bind(("127.0.0.1", PORT))
-                bind_desc = "127.0.0.1（检测到 adb，按 USB 模式只绑回环，不需要防火墙规则）"
+                bind_desc = "127.0.0.1（检测到平板在线，按 USB 模式只绑回环，不需要防火墙规则）"
             except OSError:
                 srv.bind(("0.0.0.0", PORT))
                 bind_desc = "0.0.0.0（回环被占，改全网卡）"
         else:
             srv.bind(("0.0.0.0", PORT))
-            bind_desc = "0.0.0.0（没检测到 adb，按纯 WiFi 模式监听全网卡；需放行防火墙 TCP:%d）" % PORT
+            bind_desc = "0.0.0.0（没有平板在线，按纯 WiFi 模式监听全网卡；需放行防火墙 TCP:%d）" % PORT
     srv.listen(2)
     srv.settimeout(1.0)
     print("监听     : %s:%d" % (bind_desc.split("（")[0], PORT))
@@ -377,83 +610,94 @@ def main():
                 continue
             except OSError:                     # 收尾时 srv.close() 会让 accept 抛 10038
                 break
-            old = st["client"]
-            if old is not None:                 # 只允许一路，旧连接踢掉
-                try:
-                    old.close()
-                except OSError:
-                    pass
+            # 只把最新连接当作"当前音源"；旧连接不踢，继续读空但绝不混进音频。
+            # 平板上可能因为多次 am start 同时跑着多个推流线程：
+            # 踢掉旧连接会让它们互相抢着重连（实测 50 次/秒的连接风暴），
+            # 所以这里保留它们，只静默丢弃其数据。
+            st["client"] = conn
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             threading.Thread(target=reader, args=(conn, addr), daemon=True).start()
 
     threading.Thread(target=accept_loop, daemon=True).start()
 
-    rec, capstream, t_rec = [], None, time.time()
-    if a.record:
-        cap_idx, cap_name = pick("CABLE Output", True)
-        print("同时录音 : #%s %s %.1fs -> verify.wav" % (cap_idx, cap_name, a.record))
+    holder = {}
 
-        def capcb(indata, frames, t, status):
-            rec.append(indata.copy())
-        capstream = sd.InputStream(samplerate=SR, channels=1, dtype="int16",
-                                   device=cap_idx, callback=capcb, blocksize=a.block)
-        capstream.start()
-        t_rec = time.time()
-
-    tlast, vlast, vpkts = time.time(), st["recv"], st["pkts"]
-    try:
-        with sd.OutputStream(samplerate=SR, channels=1, dtype="int16",
-                             device=out_idx, callback=cb, blocksize=a.block, latency=lat):
-            while st["alive"]:
-                time.sleep(2.0)
-                now = time.time()
-                rate = (st["recv"] - vlast) / max(now - tlast, 1e-6)
-                dpk = st["pkts"] - vpkts
-                tlast, vlast, vpkts = now, st["recv"], st["pkts"]
-                if adb and st["client"] is None and device_present(adb):
-                    if want_loopback:
-                        run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
-                    if not st["install_tried"]:
-                        st["install_tried"] = True
-                        # 只在没人在推流时动平板，免得为"顺手升级"打断用户正在用的麦克风
-                        threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
-                elif st["client"] is not None:
-                    st["install_tried"] = False
-                with lock:
-                    w = depth_ms()
-                print("[%s] %s 水位%.0fms %dB/s 包间隔 本窗>%.0fms:%d/%d >200ms:%d 最大%.0fms "
-                      "累计%.1fs 欠载%d 丢块%d 心跳%d 连接%d"
-                      % (time.strftime("%H:%M:%S"),
-                         "推流中" if st["client"] else "等设备连",
-                         w, rate, GAP_MS, st["gap50"] if dpk else 0, dpk,
-                         st["gap200"], st["gapmax"],
-                         st["recv"] / 2 / SR,
-                         st["underrun"], st["drop"], st["pongs"], st["conns"]), flush=True)
-                st["gap50"] = st["gap200"] = 0
-                st["gapmax"] = 0.0
-                if a.record and time.time() - t_rec >= a.record:
-                    break
-    except KeyboardInterrupt:
-        print("\nCtrl-C，收尾")
-    finally:
-        st["alive"] = False
-        if adb:
-            run_adb(adb, "reverse", "--remove-all")
-        srv.close()
-        if capstream is not None:
-            capstream.stop()
+    def core_loop():
+        rec, capstream, t_rec = [], None, time.time()
         if a.record:
-            if rec:
-                x = np.concatenate([r.reshape(-1) for r in rec]).astype("<i2")
-                w = wave.open(os.path.join(HERE, "verify.wav"), "wb")
-                w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
-                w.writeframes(x.tobytes()); w.close()
-                print("已存 verify.wav %.1fs 峰值 %d  ->  "
-                      "node .../ws-transcribe.mjs \"%s\""
-                      % (len(x) / SR, int(np.max(np.abs(x.astype(np.int64)))),
-                         os.path.join(HERE, "verify.wav")))
-            else:
-                print("没录到东西")
+            cap_idx, cap_name = pick("CABLE Output", True)
+            print("同时录音 : #%s %s %.1fs -> verify.wav" % (cap_idx, cap_name, a.record))
+
+            def capcb(indata, frames, t, status):
+                rec.append(indata.copy())
+            capstream = sd.InputStream(samplerate=SR, channels=1, dtype="int16",
+                                       device=cap_idx, callback=capcb, blocksize=a.block)
+            capstream.start()
+            t_rec = time.time()
+
+        tlast, vlast, vpkts = time.time(), st["recv"], st["pkts"]
+        try:
+            with sd.OutputStream(samplerate=SR, channels=1, dtype="int16",
+                                 device=out_idx, callback=cb, blocksize=a.block, latency=lat):
+                while st["alive"]:
+                    time.sleep(2.0)
+                    now = time.time()
+                    rate = (st["recv"] - vlast) / max(now - tlast, 1e-6)
+                    dpk = st["pkts"] - vpkts
+                    tlast, vlast, vpkts = now, st["recv"], st["pkts"]
+                    if adb and st["client"] is None and device_present(adb):
+                        if want_loopback:
+                            run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
+                        if not st["install_tried"]:
+                            st["install_tried"] = True
+                            # 只在没人在推流时动平板，免得为"顺手升级"打断用户正在用的麦克风
+                            threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
+                    elif st["client"] is not None:
+                        st["install_tried"] = False
+                    with lock:
+                        w = depth_ms()
+                    print("[%s] %s 水位%.0fms %dB/s 包间隔 本窗>%.0fms:%d/%d >200ms:%d 最大%.0fms "
+                          "累计%.1fs 欠载%d 丢块%d 心跳%d 连接%d"
+                          % (time.strftime("%H:%M:%S"),
+                             "推流中" if st["client"] else "等设备连",
+                             w, rate, GAP_MS, st["gap50"] if dpk else 0, dpk,
+                             st["gap200"], st["gapmax"],
+                             st["recv"] / 2 / SR,
+                             st["underrun"], st["drop"], st["pongs"], st["conns"]), flush=True)
+                    st["gap50"] = st["gap200"] = 0
+                    st["gapmax"] = 0.0
+                    if holder.get("refresh"):
+                        holder["refresh"]()
+                    if a.record and time.time() - t_rec >= a.record:
+                        break
+        except KeyboardInterrupt:
+            print("\nCtrl-C，收尾")
+        finally:
+            st["alive"] = False
+            # 切换模式时新实例会重发 reverse；这时删了会把新实例的隧道拆掉
+            if adb and not st["switching"]:
+                run_adb(adb, "reverse", "--remove-all")
+            srv.close()
+            if capstream is not None:
+                capstream.stop()
+            if a.record:
+                if rec:
+                    x = np.concatenate([r.reshape(-1) for r in rec]).astype("<i2")
+                    w = wave.open(os.path.join(HERE, "verify.wav"), "wb")
+                    w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
+                    w.writeframes(x.tobytes()); w.close()
+                    print("已存 verify.wav %.1fs 峰值 %d  ->  "
+                          "node .../ws-transcribe.mjs \"%s\""
+                          % (len(x) / SR, int(np.max(np.abs(x.astype(np.int64)))),
+                             os.path.join(HERE, "verify.wav")))
+                else:
+                    print("没录到东西")
+        if a.record:               # --record 是一次性诊断：录完收托盘，进程结束
+            ic = holder.get("icon")
+            if ic is not None:
+                ic.stop()
+
+    run_tray(a, st, fatal=None, core=core_loop, holder=holder)
     return 0
 
 

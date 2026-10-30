@@ -7,8 +7,45 @@ Windows 就多出一个录音设备 **`CABLE Output (VB-Audio Virtual Cable)`**�
 
 **一句话：不用买 USB 麦克风，不用改任何上层软件，一根数据线搞定。**
 
-当前状态：**已做完并在真机验收通过**（2026-10-30，`release/mic-bridge-0.3.2.apk` 已装机）。
-识别验收原文逐字命中，数字见 [`docs/验收记录.md`](docs/验收记录.md)。
+当前状态：**已做完并在真机验收通过**（2026-10-30，平板端 `release/mic-bridge-0.5.0.apk` 已装机，
+接收端 `v0.6.0`）。识别验收原文逐字命中，数字见 [`docs/验收记录.md`](docs/验收记录.md)。
+
+---
+
+## v0.6.0 更新（2026-10-30 深夜）：接收端托盘常驻，黑色窗口退场
+
+平板端仍是 **0.5.0**，这一版只动 Windows 接收端的形态。
+
+1. **系统托盘常驻，无窗口**：EXE 改为 windowless，不再弹黑色控制台。托盘图标颜色即状态——
+   **绿=推流中、灰=等平板连接、红=故障**（悬停看原因），悬停一句话详情（链路/模式/速率）。
+2. **右键菜单**：状态行 / **切换 USB⇄WiFi**（重启换链路）/ **显示诊断日志**（弹实时滚动窗口）/ 退出。
+   切换已真机实测：USB→WiFi→USB 各重启一次，平板每次自动重连，稳定 32KB/s、丢块个位数。
+3. **日志落盘**：`%LOCALAPPDATA%\mic-bridge\receiver.log`（超 1MB 自动换 `.old`）。
+   重复启动不再静默假死——弹"已在运行"提示；端口被占、没装 VB-Cable 都有可见反馈（红盘/弹窗）。
+4. **安装包 0.6.0**：postinstall 直接启动接收端（无残留 pause 窗口），开始菜单/桌面图标直指 EXE；
+   两个 bat 保留作诊断入口。修复 `isreadme` 标志在静默安装时弹 ShellExecuteEx 错误窗的问题
+   （改 postinstall 可选复选框）。
+
+验收数字：3 轮静默装/卸全过（退出码 0、装出 EXE 与 dist 哈希一致、目录删净、防火墙规则随装随删）；
+端到端：平板说话 App 端峰值 2320，同窗 CABLE Output 录到峰值 1965。
+
+---
+
+## v0.5.1 更新（2026-10-30 晚）：接收端修多连接 + 内置 adb + 中文安装包
+
+平板端仍是 **0.5.0**，这一版只动 Windows 接收端和分发方式。
+
+1. **修多连接混流**：接收端现在只把**最新连接**当音源，其它连接只排空、不混音，
+   但**所有连接都回心跳**。修复前曾出现两条 32KB/s 流叠成 64KB/s、丢块约 40/s、
+   连接数暴涨到 50 次/秒；修复后 USB 稳定在 32KB/s、1 条连接、欠载 0。
+2. **内置 adb**：EXE 里打包 platform-tools，首次运行解到
+   `%LOCALAPPDATA%\mic-bridge\platform-tools`。不再依赖 PATH / WinGet / Android SDK，
+   也不会因为"找不到 adb"静默退化成纯 WiFi（原 EXE 的坑）。
+3. **中文安装包**：`mic-bridge-setup-0.5.1.exe`，Inno Setup 7 + 官方简体中文语言文件，
+   安装时检测 VB-Cable、可选防火墙规则、开始菜单/桌面快捷方式、标准卸载。
+   VB-Cable 因授权限制**只检测不内嵌**。
+
+完整的原因、修法和实测数字见 [`docs/接收端0.5.1与安装包.md`](docs/接收端0.5.1与安装包.md)。
 
 ---
 
@@ -50,6 +87,9 @@ App 只连平板**自己的** `127.0.0.1:5005`；`adb reverse tcp:5005 tcp:5005`
 
 ## 新电脑部署（两步半）
 
+最省事：直接装 `mic-bridge-setup-0.6.0.exe`（内置 adb 与平板 APK，装完托盘常驻无窗口）。
+想从源码起，按下面的步骤：
+
 ```powershell
 # 1) 装运行时依赖（adb + VB-Cable + Python 虚拟环境）。默认是演练，加 -Go 才动手
 powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
@@ -59,7 +99,7 @@ powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Go
 powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Go -WithBuild
 
 # 2) 装 App 并起流
-adb install -r release\mic-bridge-0.3.2.apk
+adb install -r release\mic-bridge-0.5.0.apk
 python pc_receiver.py            # 常驻；或双击「启动接收端.bat」
 adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 ```
@@ -90,7 +130,8 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 | `run_selftest.sh` | 无人值守回归：平板自己外放已知音频、自己听回来、PC 录下、出数字 |
 | `acoustic_probe.py` / `look.py` | 声学回环与包络/频谱分析 |
 | `spike/` | **丢弃型**验证脚本，结论已冻结在 `PLAN.md`，别当实现参考（见 `spike/README.md`） |
-| `release/mic-bridge-0.3.2.apk` | 当前装机版本（20.9 KB，含签名） |
+| `release/mic-bridge-0.5.0.apk` | 当前装机版本（20.9 KB，含签名） |
+| `installer/` | 中文安装包脚本（Inno Setup 7）：`installer.iss`、启动脚本、使用说明 |
 | `PLAN.md` | 决策与实测台账：每条结论带出处 |
 | `AGENTS.md` | **给接手的 AI/程序员的硬约束与禁止事项，动手前先读这个** |
 | `docs/验收记录.md` | 验收数字与原文 |
@@ -155,17 +196,26 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity \
 ### 怎么打出这个 EXE
 
 ```bash
+# platform-tools\ 里放 adb.exe / AdbWinApi.dll / AdbWinUsbApi.dll（从 Android SDK 复制，已 gitignore）
 pyinstaller --onefile --console --name mic-bridge-receiver \
-    --add-data "<绝对路径>/release/mic-bridge-0.5.0.apk;." pc_receiver.py
+    --add-data "<绝对路径>/release/mic-bridge-0.5.0.apk;." \
+    --add-data "<绝对路径>/platform-tools;platform-tools" pc_receiver.py
 ```
 
-两个必须知道的坑：
+产物约 **28 MB**（v0.5.0 是 21 MB，多出来的就是 adb）。
+
+六个必须知道的坑（每条都踩过）：
 - `--add-data` 的**源路径是相对 `--specpath` 解析的**，不是当前工作目录 → 一律写绝对路径，
   否则报 `Unable to find ...`。
 - **目标 EXE 正在运行时 PyInstaller 会 `PermissionError` 且构建不中断**，
   于是你会拿着旧二进制以为是新的。判据只有产物**字节数 + sha256**。
+- **内置 adb 不能直接从 `sys._MEIPASS` 跑**：onefile 退出会删临时目录，而 adb server 是常驻进程，
+  下次启动时 server 还指着已删除的 `adb.exe`，表现成"莫名其妙的连不上"。
+  必须先复制到固定目录（`%LOCALAPPDATA%\mic-bridge\platform-tools`）。
+- **`--bind auto` 按"有没有设备在线"判断，不是"有没有 adb"**。内置 adb 之后后者恒真，
+  纯 WiFi 那台电脑会永远绑 `127.0.0.1`，平板连不进来且不报任何错。
 - 打完必须 `.\mic-bridge-receiver.exe --list` 能列出 CABLE 设备，才说明 PortAudio 真被打包进去了。
-- EXE 与 APK 都**不进 git**（`dist/` 已忽略），走 GitHub Release `v0.5.0`；
+- EXE 与 APK 都**不进 git**（`dist/` 已忽略），走 GitHub Release；
   更新资产用 `gh release upload <tag> <file> --clobber`（**没有 `--overwrite` 这个参数，会静默不上传**），
   上传后回读 `releases/latest` 的 `.assets[].digest` 核对。
 
@@ -178,7 +228,7 @@ pyinstaller --onefile --console --name mic-bridge-receiver \
 
 ### 收音的那台电脑（可以完全没有 adb、没有 Python）
 
-从 **Releases** 下载 `mic-bridge-receiver.exe`（单文件，约 21 MB，自带 PortAudio）：
+从 **Releases** 下载 `mic-bridge-receiver.exe`（单文件，约 28 MB，自带 PortAudio 和 adb）：
 
 ```powershell
 # 放行入站端口（WiFi 必需，不做这步接收端只会一直"等设备连"且不报错）
