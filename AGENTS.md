@@ -146,3 +146,48 @@ node E:/github项目/yuyin-shuru-trial/test/ws-transcribe.mjs verify.wav zh
 - 音源 `VOICE_COMMUNICATION` vs `VOICE_RECOGNITION` 未做正式 A/B。
 
 台账（每条结论的出处、实测数字、环境变更记录）在 `PLAN.md`，改架构前先读它。
+
+---
+
+## 6. WiFi 双链路与 PC 端 EXE（2026-10-30 下午新增）
+
+### 真实拓扑（别再按"同网段"去推理）
+
+- 平板挂的是**另一台电脑共享出来的 WiFi**；那台电脑和本机在同一个局域网。
+- 平板自己的网卡是 `192.168.137.224/24`，但它的包**到达本机时源地址变成 `192.168.168.38`**
+  —— 那台电脑做了 NAT。所以"网段不同所以连不上"是**错判**。
+- 成立的唯一条件是**平板能主动出站连到电脑**，而我们已经用真流量验证过（拔线后连续推流 270+ 秒）。
+- 反方向（电脑 → 平板）**100% 丢包**，所以 UDP 广播 / mDNS 自动发现不可用：
+  **电脑 IP 必须在平板上填一次**（界面按钮或 `--es lan <IP>`，存 SharedPreferences）。
+
+### 新增硬坑（每一条都是今天踩出来的）
+
+| # | 坑 | 正解 |
+|---|---|---|
+| 38 | **TCP 连上 ≠ 有人消费**。`adb reverse` 在设备侧的桩会"**先 accept、后失败**"；接收端 accept 线程死掉时，平板照样显示"已连 USB、速率 32000 B/s"，数据全写进内核缓冲区进了黑洞 | 心跳是**硬要求**：连上 `PONG_FIRST_MS`(10s) 内必须收到第一个 `P`，之后每 `PONG_TIMEOUT_MS`(6s) 必须续上，否则判黑洞、换链路 |
+| 39 | **不要在监听地址不含回环时下发 `adb reverse`**。一旦下发，设备上就有一个"假装能连"的回环桩，App 每轮都先撞上它、1 秒后 EPIPE，**永远轮不到 WiFi** | `pc_receiver.py` 仅在 `--bind ∈ {auto, 127.0.0.1, 0.0.0.0}` 时下发 reverse |
+| 40 | accept 里写了 `conn, _ = srv.accept()` 却把 `addr` 传给 reader → **`NameError` 让线程静默死掉**，主循环日志照刷，表面完全正常 | 见"日志在动但连接数为 0"，第一件事是 `grep "Exception in thread"`，不要去怀疑网络 |
+| 41 | `recv(65536)` 等于**一口吞下 2 秒音频**，预缓冲被直接顶到 640ms（目标本是 250ms） | 单次读上限 `--recv-bytes 3200`（=100ms）；改完水位实测 **300-340ms** |
+| 42 | **WiFi 模式必须放行 Windows 入站 TCP:5005**，否则接收端只会一直"等设备连"，看不出任何报错 | `setup_windows.ps1 -Go -Firewall`；规则名 `mic-bridge-receiver-5005`；删除：`netsh advfirewall firewall delete rule name=mic-bridge-receiver-5005` |
+| 43 | **不设 `SO_REUSEADDR`**。Windows 上它允许静默重复绑定同一端口，于是出现"两个接收端同时在跑，一个真收、一个空转刷日志"，排查时被误导成"链路坏了" | 已去掉，并保留启动前端口探测（`connect_ex`） |
+| 44 | `taskkill` 掉正在服务 adb 连接的接收端，会把 **adbd 打回 `offline`**，之后拔插/复位才恢复 | 优先用 Ctrl-C 让它走 `finally` 正常收尾；脚本已把 `adb reverse --remove-all` 收敛为"只有装了 adb 才执行" |
+
+### PC 端 EXE
+
+```bash
+pyinstaller --onefile --console --name mic-bridge-receiver pc_receiver.py
+# 产物 dist/mic-bridge-receiver.exe，约 21 MB
+```
+
+- **必须用 `--list` 验一次**：能列出 CABLE 设备才说明 PortAudio 的 DLL 被正确打包
+  （PyInstaller 打音频程序最容易在这一步静默失败）。
+- **EXE 不进 git**（`dist/` 已在 `.gitignore`），走 **GitHub Release** 分发。
+- 远端那台电脑**没有 adb 也不需要 adb**：`find_adb()` 找不到就跳过 reverse，
+  `--bind auto` 会自动改绑 `0.0.0.0` 进入纯 WiFi 模式。
+
+### 现在到底装的是哪一版（别说错）
+
+- 平板上**当前实跑 v0.4.1**（心跳硬要求已生效）。
+- `release/mic-bridge-0.5.0.apk` 已构建但 **`adb install` 当时因设备掉线未成功**，
+  它多的是"连上却收不到心跳就翻转链路优先级"这条逻辑，**尚未真机验证**。
+  验证要等 USB 恢复：`adb install -r release/mic-bridge-0.5.0.apk`。

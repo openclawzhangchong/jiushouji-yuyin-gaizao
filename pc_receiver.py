@@ -18,6 +18,9 @@ except Exception:
 
 SR = 16000
 PORT = 5005
+PONG = b"P"                          # 协议：每 2 秒回写 1 字节，平板 6 秒收不到就重选链路
+PONG_EVERY = 2.0
+GAP_MS = 50.0                        # 包间隔超过这个值算一次"网络打嗝"
 ADB_CANDIDATES = [
     os.path.expandvars(
         r"%LOCALAPPDATA%\Microsoft\WinGet\Packages"
@@ -79,8 +82,18 @@ def main():
     ap.add_argument("--max-water", type=float, default=180.0, help="超过就丢最老的，防止越积越久")
     ap.add_argument("--latency", default="low", help="low / high / default / 秒数")
     ap.add_argument("--block", type=int, default=320, help="每次回调帧数，320=20ms")
-    ap.add_argument("--bind", default="127.0.0.1")
+    ap.add_argument("--bind", default="auto",
+                    help="auto=优先只监听回环(配合 adb reverse，不额外开防火墙)；"
+                         "0.0.0.0 或某个网卡 IP = 同时接受平板从局域网连进来")
+    ap.add_argument("--water-lan", type=float, default=250.0,
+                    help="WiFi 链路的目标水位 ms（实测该网段 RTT 常见 15-30ms 但会尖到 240ms）")
+    ap.add_argument("--max-water-lan", type=float, default=700.0,
+                    help="WiFi 链路的丢最老阈值 ms")
+    ap.add_argument("--no-lan-water", action="store_true",
+                    help="WiFi 链路也用 USB 那套水位（想在网络质量好时压延迟用）")
     ap.add_argument("--record", type=float, default=0, help="从 CABLE Output 录 N 秒存 verify.wav")
+    ap.add_argument("--recv-bytes", type=int, default=3200,
+                    help="单次最多读多少字节。65536 会一口吞掉 2 秒音频，把预缓冲直接顶过头")
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args()
 
@@ -90,31 +103,44 @@ def main():
                                                  d["max_output_channels"], d["name"]))
         return 0
 
-    adb = find_adb()
-    if not adb:
-        print("!! 没找到 adb（先 winget install Google.PlatformTools）")
-        return 2
+    adb = find_adb()          # WiFi 模式的远端电脑没有平板数据线，没有 adb 也要能跑
 
     out_idx, out_name = (a.out, "(指定)") if a.out is not None else pick("CABLE Input", False)
     lat = None if a.latency == "default" else (
         a.latency if a.latency in ("low", "high") else float(a.latency))
 
-    print("adb      : %s" % adb)
+    print("adb      : %s" % (adb if adb else "没有（纯 WiFi 模式，不做 adb reverse）"))
     print("灌入设备 : #%s %s @%dHz mono  latency=%s block=%d帧" %
           (out_idx, out_name, SR, a.latency, a.block))
     print("水位     : 目标 %.0fms，超 %.0fms 丢最老" % (a.water, a.max_water))
 
-    print(run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT).strip()
-          or "adb reverse tcp:%d tcp:%d 已下发" % (PORT, PORT))
+    # 只在监听地址真的覆盖回环时才下发 adb reverse。
+    # 否则回环桩会"先接受、后失败"，平板会以为 USB 通了而永远轮不到 WiFi。
+    want_loopback = a.bind in ("auto", "127.0.0.1", "0.0.0.0")
+    if adb and want_loopback:
+        print(run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT).strip()
+              or "adb reverse tcp:%d tcp:%d 已下发" % (PORT, PORT))
+    elif adb:
+        print("（绑定 %s 不含回环，跳过 adb reverse —— 这是纯 WiFi 模式）" % a.bind)
 
     buf = collections.deque()
     lock = threading.Lock()
-    st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True)
+    st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True,
+              link="?", water=a.water, max_water=a.max_water,
+              last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0)
 
     def depth_ms():
         return sum(len(x) for x in buf) * 1000.0 / SR
 
     def cb(outdata, frames, t, status):
+        # 水位真正参与控制：刚连上或饿过一回时先憋着不出声，把缓冲攒到目标水位再放。
+        # WiFi 链路靠它吸收尖峰（实测该网段会偶发 150-250ms 的包间隔）。
+        # 只在"能攒得起来"的前提下等：水位已经顶到 max_water 还不够 target，
+        # 说明发送端本身就慢（或水位设太大），这时必须放音，否则会永远卡在静音。
+        d = depth_ms()
+        if d < st["water"] and d < st["max_water"]:
+            outdata[:, 0] = 0
+            return
         got = 0
         while got < frames:
             with lock:
@@ -130,44 +156,111 @@ def main():
         if got < frames:
             outdata[got:frames, 0] = 0
             if st["client"] is not None:
-                st["underrun"] += 1
+                st["underrun"] += 1        # 饿了不用再手动计时：上面的水位判据会自动把放音卡住
 
-    def reader(conn):
+    def ponger(conn):
+        """协议：每 2 秒回写 1 字节。平板 6 秒收不到就判定链路废掉并重选（USB/WiFi）。
+        只写不读；写失败说明对端已经没了，退出线程即可。"""
+        while st["alive"] and st["client"] is conn:
+            time.sleep(PONG_EVERY)
+            try:
+                conn.sendall(PONG)
+                st["pongs"] += 1
+            except OSError:
+                return
+
+    def reader(conn, addr):
         st["conns"] += 1
         st["client"] = conn
-        print("[%s] 平板已连上" % time.strftime("%H:%M:%S"))
+        loopback = addr[0] in ("127.0.0.1", "::1")
+        if loopback:
+            st["link"] = "USB(adb reverse) <- %s" % addr[0]
+            st["water"], st["max_water"] = a.water, a.max_water
+        else:
+            st["link"] = "WiFi <- %s" % addr[0]
+            if not a.no_lan_water:
+                st["water"] = a.water_lan
+                st["max_water"] = max(a.max_water_lan, a.water_lan * 2)
+        st["last_rx"] = 0.0        # 新链路：重新按当前水位攒缓冲
+        print("[%s] 平板已连上 %s  目标水位 %.0fms 上限 %.0fms"
+              % (time.strftime("%H:%M:%S"), st["link"], st["water"], st["max_water"]),
+              flush=True)
+        threading.Thread(target=ponger, args=(conn,), daemon=True).start()
         try:
             while st["alive"]:
-                data = conn.recv(65536)
+                data = conn.recv(a.recv_bytes)
                 if not data:
                     break
+                tnow = time.perf_counter()
+                if st["last_rx"]:
+                    gap = (tnow - st["last_rx"]) * 1000.0
+                    if gap > GAP_MS:
+                        st["gap50"] += 1
+                    if gap > 200:
+                        st["gap200"] += 1
+                    if gap > st["gapmax"]:
+                        st["gapmax"] = gap
+                st["last_rx"] = tnow
+                st["pkts"] += 1
                 st["recv"] += len(data)
                 blk = np.frombuffer(data, dtype="<i2")
                 buf.append(blk)
                 with lock:                      # 越积越多说明消费不动了，丢最老的保新鲜
-                    while buf and depth_ms() > a.max_water:
+                    while buf and depth_ms() > st["max_water"]:
                         buf.popleft()
                         st["drop"] += 1
         except OSError:
             pass
         finally:
             st["client"] = None
+            st["last_rx"] = 0.0
             try:
                 conn.close()
             except OSError:
                 pass
-            print("[%s] 平板断开" % time.strftime("%H:%M:%S"))
+            print("[%s] 平板断开" % time.strftime("%H:%M:%S"), flush=True)
+
+    # Windows 的 SO_REUSEADDR 允许绑到**已被占用**的端口且不报错，于是会出现
+    # "新接收端在打印、旧接收端在服务"这种假象。先探一下端口有没有人在听。
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.settimeout(0.6)
+    busy = probe.connect_ex(("127.0.0.1", PORT)) == 0
+    probe.close()
+    if busy:
+        print("!! 本机 %d 端口已经有进程在监听（多半是上一个接收端没退干净）。" % PORT)
+        print("   先关掉旧的再起，否则新起的这个看着像在跑、其实一个连接都收不到。")
+        print("   查占用： netstat -ano | findstr :%d" % PORT)
+        return 3
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((a.bind, PORT))
+    # 故意**不设** SO_REUSEADDR：Windows 上它允许静默重复绑定同一个端口，
+    # 结果是第二个接收端"启动成功、日志在刷、却一个连接都收不到"，
+    # 排查时被误当成"链路坏了"（本仓库为此栽过两次）。不设的话第二个实例直接 WSAEADDRINUSE。
+    b = a.bind
+    if b != "auto":
+        srv.bind((b, PORT))
+        bind_desc = b
+    else:
+        # auto 的含义随环境变：有 adb 就认定是"插线的那台电脑"，只绑回环，不动防火墙；
+        # 没有 adb 说明这台是"只走 WiFi 的那台电脑"，必须绑 0.0.0.0，否则平板根本连不进来。
+        if adb:
+            try:
+                srv.bind(("127.0.0.1", PORT))
+                bind_desc = "127.0.0.1（检测到 adb，按 USB 模式只绑回环，不需要防火墙规则）"
+            except OSError:
+                srv.bind(("0.0.0.0", PORT))
+                bind_desc = "0.0.0.0（回环被占，改全网卡）"
+        else:
+            srv.bind(("0.0.0.0", PORT))
+            bind_desc = "0.0.0.0（没检测到 adb，按纯 WiFi 模式监听全网卡；需放行防火墙 TCP:%d）" % PORT
     srv.listen(2)
     srv.settimeout(1.0)
+    print("监听     : %s:%d" % (bind_desc.split("（")[0], PORT))
 
     def accept_loop():
         while st["alive"]:
             try:
-                conn, _ = srv.accept()
+                conn, addr = srv.accept()      # addr 要留着：reader 靠它区分 USB 回环还是 WiFi
             except socket.timeout:
                 continue
             except OSError:                     # 收尾时 srv.close() 会让 accept 抛 10038
@@ -179,7 +272,7 @@ def main():
                 except OSError:
                     pass
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            threading.Thread(target=reader, args=(conn,), daemon=True).start()
+            threading.Thread(target=reader, args=(conn, addr), daemon=True).start()
 
     threading.Thread(target=accept_loop, daemon=True).start()
 
@@ -195,7 +288,7 @@ def main():
         capstream.start()
         t_rec = time.time()
 
-    tlast, vlast = time.time(), st["recv"]
+    tlast, vlast, vpkts = time.time(), st["recv"], st["pkts"]
     try:
         with sd.OutputStream(samplerate=SR, channels=1, dtype="int16",
                              device=out_idx, callback=cb, blocksize=a.block, latency=lat):
@@ -203,23 +296,30 @@ def main():
                 time.sleep(2.0)
                 now = time.time()
                 rate = (st["recv"] - vlast) / max(now - tlast, 1e-6)
-                tlast, vlast = now, st["recv"]
-                if st["client"] is None and device_present(adb):
+                dpk = st["pkts"] - vpkts
+                tlast, vlast, vpkts = now, st["recv"], st["pkts"]
+                if want_loopback and adb and st["client"] is None and device_present(adb):
                     run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
                 with lock:
                     w = depth_ms()
-                print("[%s] %s 水位%.0fms %dB/s 累计%.1fs 欠载%d 丢块%d 连接%d"
+                print("[%s] %s 水位%.0fms %dB/s 包间隔 本窗>%.0fms:%d/%d >200ms:%d 最大%.0fms "
+                      "累计%.1fs 欠载%d 丢块%d 心跳%d 连接%d"
                       % (time.strftime("%H:%M:%S"),
                          "推流中" if st["client"] else "等设备连",
-                         w, rate, st["recv"] / 2 / SR,
-                         st["underrun"], st["drop"], st["conns"]))
+                         w, rate, GAP_MS, st["gap50"] if dpk else 0, dpk,
+                         st["gap200"], st["gapmax"],
+                         st["recv"] / 2 / SR,
+                         st["underrun"], st["drop"], st["pongs"], st["conns"]), flush=True)
+                st["gap50"] = st["gap200"] = 0
+                st["gapmax"] = 0.0
                 if a.record and time.time() - t_rec >= a.record:
                     break
     except KeyboardInterrupt:
         print("\nCtrl-C，收尾")
     finally:
         st["alive"] = False
-        run_adb(adb, "reverse", "--remove-all")
+        if adb:
+            run_adb(adb, "reverse", "--remove-all")
         srv.close()
         if capstream is not None:
             capstream.stop()

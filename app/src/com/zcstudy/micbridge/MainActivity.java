@@ -1,7 +1,10 @@
 package com.zcstudy.micbridge;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Context;
+import android.content.DialogInterface;
+import android.content.SharedPreferences;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -16,6 +19,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -48,11 +52,19 @@ public class MainActivity extends Activity {
         // aapt2 配老存根会静默丢掉 manifest 里的 android:theme，主题只能在代码里设
         setTheme(android.R.style.Theme_DeviceDefault);
         super.onCreate(b);
+        String lanArg = null;
         if (getIntent() != null) {
             String d = getIntent().getStringExtra("demo");
             if (d != null && d.length() > 0) demoPath = d;
+            // 无人值守配 WiFi 目标：--es lan 192.168.168.250；--es lan "" 等于清掉（只用 USB）
+            if (getIntent().hasExtra("lan")) lanArg = getIntent().getStringExtra("lan");
         }
         bridge = new Bridge(this);
+        bridge.lanHost = prefs().getString("lan_host", "");
+        if (lanArg != null) {
+            bridge.lanHost = lanArg.trim();
+            prefs().edit().putString("lan_host", bridge.lanHost).apply();
+        }
         setContentView(build());
         paint();
         // 无人值守：am start -n com.zcstudy.micbridge/.MainActivity --ez auto true [--es act selftest]
@@ -124,6 +136,13 @@ public class MainActivity extends Activity {
             @Override public void onClick(View v) { switchSource(); }
         });
         box.addView(btnSrc);
+
+        Button btnLan = new Button(c);
+        btnLan.setText("WiFi 兜底：电脑 IP = " + (bridge.lanHost.isEmpty() ? "未设置" : bridge.lanHost));
+        btnLan.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { askLanHost(btnLan); }
+        });
+        box.addView(btnLan);
 
         tvHint = new TextView(c);
         tvHint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
@@ -260,6 +279,36 @@ public class MainActivity extends Activity {
                 | ((b[o + 2] & 0xff) << 16) | ((b[o + 3] & 0xff) << 24);
     }
 
+    private SharedPreferences prefs() {
+        return getSharedPreferences("micbridge", Context.MODE_PRIVATE);
+    }
+
+    /** WiFi 兜底目标只能手填：平板和电脑现在跨网段且电脑反向 ping 不通，广播/mDNS 发现不了。 */
+    private void askLanHost(final Button btn) {
+        final EditText e = new EditText(this);
+        e.setSingleLine();
+        e.setText(bridge.lanHost);
+        e.setHint("电脑局域网 IP，如 192.168.168.250");
+        new AlertDialog.Builder(this)
+                .setTitle("WiFi 兜底地址（端口 " + Bridge.PORT + "）")
+                .setView(e)
+                .setPositiveButton("保存", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface d, int id) {
+                        String v = e.getText().toString().trim();
+                        bridge.lanHost = v;
+                        prefs().edit().putString("lan_host", v).apply();
+                        btn.setText("WiFi 兜底：电脑 IP = " + (v.length() == 0 ? "未设置" : v));
+                        if (bridge.isRunning()) {          // 重选链路
+                            bridge.stop();
+                            bridge.start();
+                        }
+                        paint();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private void paint() {
         long up = bridge.isRunning()
                 ? (SystemClock.elapsedRealtime() - bridge.startedAt) / 1000 : 0;
@@ -267,6 +316,7 @@ public class MainActivity extends Activity {
         tvState.setTextColor(bridge.state.equals("采麦中") ? Color.rgb(0, 150, 60) : Color.DKGRAY);
         tvData.setText("上行 " + bridge.bytesTotal + " B　"
                 + bridge.lastRate + " B/s　峰值 " + bridge.peak + "/32767\n"
+                + "链路 " + bridge.link + "　" + bridge.pongState() + "\n"
                 + "运行 " + up + "s　重连 " + bridge.reconnects
                 + "　欠采 " + bridge.shortReads + "　音源 " + Bridge.srcName(bridge.source));
         level.setPeak(bridge.peak);

@@ -128,3 +128,47 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity \
   **这台平板的硬件评估与开发全过程记录**（含本仓库的前置结论）。
   麦克风/扬声器实测、adb 驱动排错、Kiosk 自启可行性、WebView 37 兼容性都在那边。
 - `xiaole-ptt-android5-2027` —— 同设备上的语音对讲客户端，本仓库的采麦参数与出包链直接沿用它的成熟做法。
+
+---
+
+## WiFi 模式：平板不插线也能用（2026-10-30 已真机验证）
+
+平板把音频**主动 TCP 推到电脑**，所以只要平板能出站打到那台电脑就行，不需要那台电脑能反向找到平板。
+实测拓扑：平板挂在另一台电脑共享的 WiFi 上，包到达本机时源地址是**那台电脑的局域网 IP**（它做了 NAT），
+所以两个网段"看着不同"并不妨碍连通 —— 反过来，电脑 ping 平板是 100% 丢包的，
+**因此没法自动发现，电脑 IP 要在平板上填一次**。
+
+### 收音的那台电脑（可以完全没有 adb、没有 Python）
+
+从 **Releases** 下载 `mic-bridge-receiver.exe`（单文件，约 21 MB，自带 PortAudio）：
+
+```powershell
+# 放行入站端口（WiFi 必需，不做这步接收端只会一直"等设备连"且不报错）
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Go -Firewall
+
+# 直接跑：没检测到 adb 时会自动绑 0.0.0.0 进入纯 WiFi 模式
+mic-bridge-receiver.exe
+# 想同时支持"插线在这台、也接受 WiFi"就显式指定：
+mic-bridge-receiver.exe --bind 0.0.0.0
+```
+
+VB-Cable 虚拟声卡仍必须装（`setup_windows.ps1 -Go` 会装，或去 vb-audio.com 下 Pack45+）。
+
+### 平板上填电脑 IP（一次就够，存 SharedPreferences）
+
+```bash
+adb shell am start -n com.zcstudy.micbridge/.MainActivity \
+    --ez auto true --es lan 192.168.168.250
+```
+
+没有数据线时在平板界面点 **「WiFi 兜底：电脑 IP」** 按钮手填同一个地址即可。
+
+### 行为约定
+
+- **USB 优先，WiFi 兜底**：先试 `127.0.0.1:5005`（adb reverse），1.2 秒内连不上就试 WiFi。
+- 连上后电脑每 2 秒回写 1 个心跳字节 `P`；平板 **10 秒内没见到第一个、或之后 6 秒没续上**，
+  判定这条链路是"假通"，断开重选 —— 这是必须有的，因为 TCP 连上只代表进了对端缓冲区。
+- WiFi 链路自动用更大的抖动缓冲（目标 250ms，实测稳定在 300-340ms），
+  因为这条链路会偶发 100-250ms 的打嗝（见 `docs/验收记录.md`）。
+- 拔掉数据线不影响推流，但平板就靠电池了；长期用建议保留线供电。
+

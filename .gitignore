@@ -20,3 +20,9 @@ micbridge.keystore
 
 # 本机临时抓取物（空目录，git 本也不跟踪）
 artifacts/
+
+# PyInstaller 产物（走 GitHub Release，不进 git）
+dist/
+build_tmp/
+*.spec
+cap_probe.wav

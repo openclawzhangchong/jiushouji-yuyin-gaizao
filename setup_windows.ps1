@@ -9,7 +9,8 @@
 
 param(
     [switch]$Go,
-    [switch]$WithBuild
+    [switch]$WithBuild,
+    [switch]$Firewall
 )
 
 $ErrorActionPreference = 'Continue'
@@ -167,6 +168,28 @@ if ($WithBuild) {
             else { Add-Result $item.n 'FAIL' ("expected {0} after unpack" -f $item.p) }
         }
     }
+}
+
+# ---------- 5. optional: firewall rule for WiFi mode ----------
+# Without this, the tablet's inbound TCP:5005 is dropped by Windows and the receiver
+# just sits printing "waiting for device" forever.
+$fwName = 'mic-bridge-receiver-5005'
+$fwExists = $false
+netsh advfirewall firewall show rule name=$fwName > $null 2>&1
+if ($LASTEXITCODE -eq 0) { $fwExists = $true }
+if ($Firewall) {
+    if ($fwExists) {
+        Add-Result 'firewall' 'OK' "rule '$fwName' already present"
+    } elseif (Need-Go 'firewall' ("add inbound allow rule TCP:5005 (private profile) named $fwName")) {
+        netsh advfirewall firewall add rule name=$fwName dir=in action=allow protocol=TCP localport=5005 profile=private enable=yes | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Add-Result 'firewall' 'DONE' 'inbound TCP:5005 allowed (private profile only)'
+        } else {
+            Add-Result 'firewall' 'FAIL' "netsh exit $LASTEXITCODE - run this script from an elevated prompt"
+        }
+    }
+} elseif ($fwExists) {
+    Add-Result 'firewall' 'OK' "rule '$fwName' already present"
 }
 
 # ---------- summary ----------
