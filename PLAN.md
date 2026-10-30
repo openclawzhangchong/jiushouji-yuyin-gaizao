@@ -160,3 +160,34 @@ python pc_receiver.py --record 34   # 录下 CABLE Output，再丢给 ASR
 - 比较"经过虚拟麦的音频"时，**比较区间必须卡在实际发送的秒数内**并用冲激先定位，
   否则拿后半段静音比语音会得出 r=0.03 的假阴性。
 - 接收端收尾时 `srv.close()` 会让 `accept()` 抛 `WinError 10038`，要 catch。
+
+## 10. 仓库状态（2026-10-30 下午落地）
+
+| 仓库 | 内容 | 状态 |
+|---|---|---|
+| **[`jiushouji-yuyin-gaizao`](https://github.com/openclawzhangchong/jiushouji-yuyin-gaizao)**（新建，public，28 文件 / 20 topics） | 本项目全部实现：APK 源码 + 无 Gradle 出包链 + PC 接收端 + 新机一键部署 + 验收脚本 + README/AGENTS/台账/验收记录 | 已推 `main` |
+| [`jiushouji-adb-apk2027`](https://github.com/openclawzhangchong/jiushouji-adb-apk2027)（旧仓库，public） | **只加设备侧结论**：新增 `docs/09-麦克风与PC语音桥.md`，README 的文档索引与"设备速览"各补一行（麦克风从"特性声明可用"升级为"数据面实测可用"） | 已推 `main` |
+
+**拆分原则**：设备本身的事实（采麦参数、`getMinBufferSize` 单位陷阱、熄屏保活、外放自测方法论、
+adb 坑）留在设备仓库；"怎么在新电脑上重建这套东西"全归新仓库，且新仓库的 README/AGENTS 都指回旧仓库。
+
+### 推送方式（本环境的坑，不是代码问题）
+
+这台机器 `git push` 会 `curl 55 Send failure: Connection was reset` 或连不上 443，
+而 `api.github.com` 只要 0.28 秒 —— 所以用仓库内的 `push_via_api.py` 走 Git Data API
+（`blobs → trees → commits → refs`）。过程中踩到并修掉三个真问题：
+
+1. **Git Data API 不接受完全空的仓库**：连 `git/blobs` 都返 `409 Git Repository is empty`。
+   脚本改成自动用 Contents API 造一个占位提交，再续上后面的链。
+2. **`git ls-tree` 默认 `core.quotePath=true`，会把非 ASCII 路径八进制转义并连引号一起输出**。
+   我第一版按它建树，导致远端出现字面叫 `"\345\220\257…bat"` 的乱码文件名。
+   改用 `ls-tree -z`（NUL 分隔 + UTF-8 解码），并用 `--base/--force-ref` 从占位提交重建整条链纠正。
+   终检：两个仓库 `git/trees?recursive=1` 里**乱码条目 0 个**，
+   `启动接收端.bat` / `docs/验收记录.md` / `docs/09-麦克风与PC语音桥.md` 名字全对。
+3. `git/ref` 与 `git/refs` 端点要传 `heads/<branch>`；传 `refs/heads/<branch>` 会 404，
+   脚本会误判成"分支不存在"去走创建，再撞 `422 Reference already exists`。
+
+本地 `main` 与 `origin/main` 已对齐：tree hash 完全一致（`08580c1b…`），
+远端只多出那个空库 bootstrap 占位提交。构建链的 keystore 在 `C:\android-build\micbridge.keystore`
+（口令 `android`，Android 调试标准口令，非机密），`.gitignore` 已排除。
+
