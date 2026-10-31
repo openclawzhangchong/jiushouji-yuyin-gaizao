@@ -1,10 +1,11 @@
 ﻿; mic-bridge 安装脚本 (Inno Setup 7)
 #define AppName "旧平板麦克风桥"
-#define AppVer "0.6.0"
+#define AppVer "0.7.0"
 #define AppExe "mic-bridge-receiver.exe"
 
 [Setup]
 AppId={{8E2F1C7A-6B4D-4A2E-9C31-5D7A0B2E4F61}
+SetupIconFile=mic-bridge.ico
 AppName={#AppName}
 AppVersion={#AppVer}
 AppVerName={#AppName} {#AppVer}
@@ -28,20 +29,23 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务："; Flags: unchecked
+Name: "autostart"; Description: "开机自动启动接收端（当前用户，托盘常驻）"; GroupDescription: "附加任务："
 Name: "firewall"; Description: "放行 Windows 防火墙 TCP 5005（WiFi 模式需要）"; GroupDescription: "网络："
 
 [Files]
 Source: "dist\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "mic-bridge.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "release\mic-bridge-0.5.0.apk"; DestDir: "{app}"; Flags: ignoreversion
 Source: "启动USB接收端.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "启动WiFi接收端.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "使用说明.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\mic-bridge 麦克风"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"
+Name: "{group}\mic-bridge 麦克风"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; IconFilename: "{app}\mic-bridge.ico"
 Name: "{group}\使用说明"; Filename: "{app}\使用说明.txt"
 Name: "{group}\诊断：USB 模式控制台"; Filename: "{app}\启动USB接收端.bat"; WorkingDir: "{app}"
-Name: "{autodesktop}\mic-bridge 麦克风"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\mic-bridge 麦克风"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; IconFilename: "{app}\mic-bridge.ico"; Tasks: desktopicon
+Name: "{userstartup}\mic-bridge 麦克风"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; IconFilename: "{app}\mic-bridge.ico"; Tasks: autostart
 
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""mic-bridge TCP 5005"" dir=in action=allow protocol=TCP localport=5005"; Flags: runhidden; Tasks: firewall

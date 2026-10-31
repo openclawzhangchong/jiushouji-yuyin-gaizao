@@ -29,7 +29,7 @@ except Exception:
 
 SR = 16000
 PORT = 5005
-APP_VER = "0.6.0"
+APP_VER = "0.7.0"
 PONG = b"P"                          # 协议：每 2 秒回写 1 字节，平板 6 秒收不到就重选链路
 PONG_EVERY = 2.0
 GAP_MS = 50.0                        # 包间隔超过这个值算一次"网络打嗝"
@@ -230,14 +230,22 @@ def run_tray(a, st, fatal, core=None, holder=None):
     def img():
         if fatal:
             c = (216, 60, 60)
+        elif st["fb"]["on"]:
+            c = (240, 178, 30)
         elif st["client"] is None:
             c = (150, 150, 150)
         else:
             c = (30, 190, 70)
         if c not in _imgs:
+            # 麦克风剪影：胶囊麦头 + U 形支架 + 立柱底座，颜色=状态
             im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
             d = ImageDraw.Draw(im)
-            d.ellipse((8, 8, 56, 56), fill=c + (255,), outline=(25, 25, 25, 255), width=3)
+            col = c + (255,)
+            d.rounded_rectangle((24, 5, 40, 33), radius=8, fill=col,
+                                outline=(25, 25, 25, 255), width=2)
+            d.arc((15, 17, 49, 43), start=20, end=160, fill=col, width=4)
+            d.line((32, 41, 32, 50), fill=col, width=4)
+            d.line((21, 53, 43, 53), fill=col, width=4)
             _imgs[c] = im
         return _imgs[c]
 
@@ -247,6 +255,8 @@ def run_tray(a, st, fatal, core=None, holder=None):
     def text(item=None):
         if fatal:
             return "mic-bridge 故障: %s" % fatal
+        if st["fb"]["on"]:
+            return "mic-bridge 实体麦兜底中 · %s" % st["fb"]["name"]
         if st["client"] is None:
             return "mic-bridge 等待平板连接 · %s 模式" % mode()
         return "mic-bridge 推流中 · %s · %s 模式" % (st["link"].split(" <-")[0], mode())
@@ -392,10 +402,16 @@ def main():
     ap.add_argument("--install-apk", action="store_true",
                     help="只执行一次自动安装+配网然后退出（不启动音频链路）")
     ap.add_argument("--adb", default=None, help="指定 adb 可执行文件路径（默认自动找）")
+    ap.add_argument("--no-fallback", action="store_true",
+                    help="平板没声音时不要自动用实体麦克风兜底")
+    ap.add_argument("--fallback-mic", default=None,
+                    help="兜底实体麦名字（子串匹配）；默认自动挑第一个非 CABLE 的输入设备，WASAPI 优先")
+    ap.add_argument("--fallback-after", type=float, default=10.0,
+                    help="多少秒收不到平板数据就启动实体麦兜底（默认 10）")
     ap.add_argument("--list", action="store_true")
     a = ap.parse_args()
 
-    print("mic-bridge 接收端 v%s（内置 adb / 单路取音 / WiFi 兜底）" % APP_VER)
+    print("mic-bridge 接收端 v%s（内置 adb / 单路取音 / WiFi+实体麦兜底）" % APP_VER)
 
     if a.list:
         for i, d in enumerate(sd.query_devices()):
@@ -417,7 +433,8 @@ def main():
     st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True,
               link="?", water=a.water, max_water=a.max_water,
               last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0,
-              install_tried=False, switching=False)
+              install_tried=False, switching=False,
+              fb=dict(on=False, idle=0.0, name="", idx=None, stream=None, fail_until=0.0))
 
     if a.out is not None:
         out_idx, out_name = a.out, "(指定)"
@@ -487,6 +504,112 @@ def main():
             if st["client"] is not None:
                 st["underrun"] += 1        # 饿了不用再手动计时：上面的水位判据会自动把放音卡住
 
+    def fb_candidates():
+        """兜底实体麦候选：排除一切 CABLE（防自环回灌），WASAPI 优先（全名不截断）。"""
+        devs = sd.query_devices()
+        cands = []
+        for i, d in enumerate(devs):
+            if d["max_input_channels"] == 0:
+                continue
+            name = d["name"]
+            if "cable" in name.lower():
+                continue
+            if a.fallback_mic and a.fallback_mic.lower() not in name.lower():
+                continue
+            ha = str(sd.query_hostapis(d["hostapi"])["name"]).lower()
+            low = name.lower()
+            cam = any(w in low for w in ("camera", "webcam", "uvc"))
+            cands.append((int(not ("wasapi" in ha)), cam, i, name, d["default_samplerate"]))
+        cands.sort()
+        return [(i, name, rate) for _ha0, _cam, i, name, rate in cands]
+
+    def fb_stop(reason):
+        fb = st["fb"]
+        if not fb["on"]:
+            return
+        try:
+            fb["stream"].stop()
+            fb["stream"].close()
+        except Exception:
+            pass
+        fb["on"] = False
+        fb["stream"] = None
+        with lock:
+            buf.clear()
+        print("[%s] 实体麦兜底结束（%s），切回平板流" % (time.strftime("%H:%M:%S"), reason),
+              flush=True)
+
+    def fb_probe(idx, rate):
+        """开 0.4s 听一下：返回 RMS。空麦口/被静音的设备 RMS≈0，据此排序。"""
+        try:
+            s = sd.InputStream(samplerate=rate, channels=1, dtype="int16", device=idx)
+            s.start()
+            x, _flag = s.read(int(rate * 0.4))
+            s.stop(); s.close()
+            return float(np.sqrt(np.mean(x.astype(np.float64) ** 2)))
+        except Exception as e:
+            print("!! 实体麦 #%d @%.0fHz 探测失败：%s" % (idx, rate, str(e)[:80]), flush=True)
+            return -1.0
+
+    def fb_start():
+        fb = st["fb"]
+        cands = fb_candidates()
+        if not cands:
+            print("!! 找不到可用的实体麦克风（已排除 CABLE 设备）——兜底不可用", flush=True)
+            fb["fail_until"] = time.time() + 300
+            return
+        probed = []
+        for idx, name, rate in cands[:4]:
+            rms = fb_probe(idx, rate)
+            print("   兜底候选 #%d %s @%.0fHz 实测RMS=%.0f" % (idx, name, rate, rms), flush=True)
+            if rms >= 0:
+                probed.append((rms, idx, name, rate))
+        if not probed:
+            print("!! 所有候选实体麦都打不开——兜底暂不可用（60s 后重试）", flush=True)
+            fb["fail_until"] = time.time() + 60
+            return
+        # 有信号的最优先；全都≈0（房间安静/都没插）就退回原顺序取第一个能开的
+        best = max(probed, key=lambda p: (p[0] > 5.0, -p[1]))
+        _rms, idx, name, rate = best
+        ratio = float(rate) / SR
+        if abs(ratio - 1.0) < 1e-6:
+            cb_fb = lambda indata, frames, t, status: buf.append(indata[:, 0].copy())
+        else:
+            # 设备常只支持 44.1/48k：按原生率采集再线性重采样到 16k
+            def cb_fb(indata, frames, t, status, _r=ratio):
+                x = indata[:, 0].astype(np.float64)
+                n = int(len(x) / _r)
+                if n < 1:
+                    return
+                pos = np.linspace(0, len(x) - 1, n)
+                buf.append(np.interp(pos, np.arange(len(x)), x).astype("<i2"))
+        try:
+            stream = sd.InputStream(samplerate=rate, channels=1, dtype="int16",
+                                    device=idx, callback=cb_fb)
+            stream.start()
+        except Exception as e:
+            print("!! 实体麦 #%d %s 启动失败：%s（60s 后重试）" % (idx, name, e), flush=True)
+            fb["fail_until"] = time.time() + 60
+            return
+        fb["on"] = True
+        fb["idx"], fb["name"] = idx, name
+        fb["stream"] = stream
+        with lock:
+            buf.clear()
+        print("[%s] %.0fs 没收到平板数据，实体麦兜底启动：#%d %s @%.0fHz→16k"
+              % (time.strftime("%H:%M:%S"), a.fallback_after, idx, name, rate), flush=True)
+
+    def fb_shutdown():
+        fb = st["fb"]
+        if fb["on"]:
+            try:
+                fb["stream"].stop()
+                fb["stream"].close()
+            except Exception:
+                pass
+            fb["on"] = False
+            fb["stream"] = None
+
     def ponger(conn):
         """协议：每 2 秒回写 1 字节。平板 6 秒收不到就判定链路废掉并重选（USB/WiFi）。
         只写不读；写失败说明对端已经没了，退出线程即可。"""
@@ -539,6 +662,8 @@ def main():
                 st["last_rx"] = tnow
                 st["pkts"] += 1
                 st["recv"] += len(data)
+                if st["fb"]["on"]:
+                    continue          # 兜底期间只计数不进缓冲：数据一恢复 monitor 就切回
                 blk = np.frombuffer(data, dtype="<i2")
                 buf.append(blk)
                 with lock:                      # 越积越多说明消费不动了，丢最老的保新鲜
@@ -654,6 +779,22 @@ def main():
                             threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
                     elif st["client"] is not None:
                         st["install_tried"] = False
+                    fb = st["fb"]
+                    if not a.no_fallback and not a.record:
+                        if fb["on"]:
+                            if dpk > 0:
+                                fb_stop("平板数据恢复")
+                            fb["idle"] = 0.0
+                        elif time.time() >= fb["fail_until"]:
+                            if dpk == 0:
+                                fb["idle"] += 2.0
+                            else:
+                                fb["idle"] = 0.0
+                            if fb["idle"] >= a.fallback_after:
+                                fb_start()
+                                fb["idle"] = 0.0
+                    elif fb["on"]:
+                        fb_stop("兜底被关闭")
                     with lock:
                         w = depth_ms()
                     print("[%s] %s 水位%.0fms %dB/s 包间隔 本窗>%.0fms:%d/%d >200ms:%d 最大%.0fms "
@@ -674,6 +815,7 @@ def main():
             print("\nCtrl-C，收尾")
         finally:
             st["alive"] = False
+            fb_shutdown()
             # 切换模式时新实例会重发 reverse；这时删了会把新实例的隧道拆掉
             if adb and not st["switching"]:
                 run_adb(adb, "reverse", "--remove-all")

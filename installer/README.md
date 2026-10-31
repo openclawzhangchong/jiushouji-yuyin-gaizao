@@ -24,15 +24,18 @@ adb 不一样：platform-tools 是 Apache 2.0，可以随 EXE 分发（当前内
 # 1) 先在仓库根目录打 EXE（见根 README「怎么打出这个 EXE」）
 #    需要把 Android SDK 的 platform-tools 三个文件放到仓库根的 platform-tools\：
 #      adb.exe  AdbWinApi.dll  AdbWinUsbApi.dll
-#    v0.6.0 起接收端是托盘常驻，不带控制台窗口：
-pyinstaller --onefile --noconsole --name mic-bridge-receiver `
+#    v0.6.0 起接收端是托盘常驻，不带控制台窗口；v0.7.0 起带品牌图标：
+pyinstaller --onefile --noconsole --name mic-bridge-receiver --icon mic-bridge.ico `
   --add-data "$PWD\release\mic-bridge-0.5.0.apk;." `
   --add-data "$PWD\platform-tools;platform-tools" pc_receiver.py
 
 # 2) 打安装包
 & "C:\Program Files\Inno Setup 7\ISCC.exe" installer\installer.iss
-# 产物：dist\mic-bridge-setup-0.6.0.exe
+# 产物：dist\mic-bridge-setup-0.7.0.exe
 ```
+
+图标由仓库根 `gen_icon.py` 生成（Pillow 程序化绘制 16~256px 的 `mic-bridge.ico`，改设计重跑即可）。
+快捷方式的 `IconFilename` 必须指向独立 .ico——指向"EXE,0"会被 Windows 图标缓存坑住（v0.7.0 踩过）。
 
 ## 安装包做了什么
 
@@ -40,7 +43,7 @@ pyinstaller --onefile --noconsole --name mic-bridge-receiver `
 |---|---|
 | 安装目录 | `{autopf}\mic-bridge`（默认 `C:\Program Files\mic-bridge`） |
 | 文件 | 接收端 EXE（托盘常驻无窗口）、平板 APK、USB/WiFi 两个诊断脚本、使用说明 |
-| 快捷方式 | 开始菜单「mic-bridge 麦克风」+ 诊断入口；桌面快捷方式可选 |
+| 快捷方式 | 开始菜单「mic-bridge 麦克风」+ 诊断入口；桌面快捷方式可选；**开机自启（当前用户）默认勾选**（v0.7.0） |
 | 防火墙 | 可选任务，`netsh advfirewall` 放行入站 TCP 5005；卸载时删除 |
 | VB-Cable | 安装完成时检测，缺失则提示并打开官网（不内嵌） |
 | 完成页 | postinstall 直接启动接收端（托盘出现，无残留 pause 窗口）；「查看使用说明」是可选复选框 |
