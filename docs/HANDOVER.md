@@ -168,8 +168,11 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build_installer.ps1
 
 ## 7. 已知待验证 / 未完成
 
-- **A16 版未在 Android 16 真机验证**：0.6.2-a16 只完成了构建与静态检查（targetSdk/对齐/签名），
-  没有 Android 16 设备上的运行记录。真机验证前不要对外称"已支持 Android 16"。
+- **A16 版已在 Android 12 真机验证通过（见实测记录），Android 16 仍未验证**：
+  0.6.2 / 0.6.3-a16 在 realme RMX3161（Android 12 / API 31）上完成安装、联调、截图与息屏复测，
+  记录见 `docs/real-device-tests/2026-11-03-realme-RMX3161-android12/README.md`。
+  期间发现并修复了「Android 11+ 息屏后录音被判 silenced」的问题（0.6.3 加 microphone 前台服务，
+  仅改 `app/src-modern/`）。**Android 16（API 36）真机仍无运行记录**，真机验证前不要对外称"已支持 Android 16"。
 - **安装包未代码签名**：自用场景接受 SmartScreen 提示；要分发需补证书并走 `-Sign`。
 - **`platform-tools` 未内置**：仓库根目录当前没有 `platform-tools/`，`mic_bridge_receiver.spec`
   只在目录存在时才打包 adb。分发前需补齐 `adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll`。

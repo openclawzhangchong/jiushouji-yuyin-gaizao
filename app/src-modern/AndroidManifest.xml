@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Android 11+ 息屏/后台继续采麦：必须有 microphone 类型的前台服务 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- Android 13+ 读共享存储音频改走 READ_MEDIA_AUDIO；旧权限只在 12 及以下生效 -->
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
@@ -34,5 +38,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 送话期间的 microphone 前台服务：没有它，息屏后 AudioService 会把录音判为 silenced -->
+        <service
+            android:name="com.zcstudy.micbridge.MicService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 </manifest>

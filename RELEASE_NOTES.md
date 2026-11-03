@@ -238,3 +238,25 @@ Release 里标注「旧机推荐 / Legacy」的 `mic-bridge-0.5.0.apk` 就是这
 - 保持 0.7.1 的行为：连续 10 次探测失败后停止主动探测；全链路无控制台窗口
   （采样 22/22 次 `cmd` 可见窗口 = 0）；二次启动静默 `exit=3`。
 - 覆盖安装即可，快捷方式与自启项无需重配。
+
+### v0.6.2 首次真机实测（Android 12 / realme RMX3161）+ v0.6.3-a16 修复息屏静音（2026-11-03）
+
+**实测**
+- 0.6.2-a16（VC11）首次装进真机：realme RMX3161，**Android 12 / API 31**（不是 Android 16）。
+  `adb install -r` 成功；`adb reverse tcp:5005` 后稳定上行 32,000 B/s，界面/图标正常，无崩溃。
+- 实测发现：**息屏 30 秒后字节仍在推，但麦克风峰值归 0**。`dumpsys audio` 的 RecordActivityMonitor 显示
+  `silenced:true`，进程状态为 `top-sleeping`，`appops RECORD_AUDIO` 为 `foreground`——
+  属 Android 11+ 的后台录音限制，`PARTIAL_WAKE_LOCK` 无法规避（旧机 Android 5.1 无此限制）。
+- 完整设备表、命令输出、logcat 原文与脱敏截图：
+  `docs/real-device-tests/2026-11-03-realme-RMX3161-android12/`
+
+**修复（0.6.3-a16 / VC12，仅动 `app/src-modern/`）**
+- 新增 `MicService`：`foregroundServiceType="microphone"` 前台服务 + 常驻通知「麦克风桥正在送话」，
+  开始/停止送话时随 `Bridge` 同步启停。
+- Manifest 补 `FOREGROUND_SERVICE`、`FOREGROUND_SERVICE_MICROPHONE`、`POST_NOTIFICATIONS`。
+- 复测：息屏 30 秒内 `silenced:false`，峰值 5516 / 10205 / 416（随环境音变化），速率 32 KB/s，零重连。
+- legacy 的 `app/src/`、`app/AndroidManifest.xml`、`build.sh`、`release/mic-bridge-0.5.0.apk` 零改动。
+
+**注意**
+- 新产物 `release/mic-bridge-a16-0.6.3.apk`（95,328 B）。
+- Android 16（API 36）真机仍**未**验证；Android 13+ 需授予通知权限，否则前台服务通知不可见（服务仍有效）。

@@ -5,6 +5,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.DialogInterface;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Canvas;
@@ -210,6 +211,7 @@ public class MainActivity extends Activity {
     private void toggle() {
         if (bridge.isRunning()) {
             bridge.stop();
+            stopMicService();
             btnToggle.setText("开始送话");
         } else {
             if (!hasPermission(Manifest.permission.RECORD_AUDIO)) {
@@ -218,10 +220,22 @@ public class MainActivity extends Activity {
                 paint();
                 return;
             }
+            startMicService();
             bridge.start();
             btnToggle.setText("停止送话");
         }
         paint();
+    }
+
+    /** 抬到 microphone 前台服务：Android 11+ 息屏后只有前台服务能继续采麦。 */
+    private void startMicService() {
+        Intent it = new Intent(this, MicService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(it);
+        else startService(it);
+    }
+
+    private void stopMicService() {
+        stopService(new Intent(this, MicService.class));
     }
 
     @Override
@@ -417,6 +431,7 @@ public class MainActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         bridge.stop();
+        stopMicService();
     }
 
     private int dp(int v) {
