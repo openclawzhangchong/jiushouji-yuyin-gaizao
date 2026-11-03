@@ -153,10 +153,14 @@ session:66649 ... pack:com.zcstudy.micbridge.a16 ... silenced:false
 
 | 文件 | 内容 | 对应结论 |
 |---|---|---|
-| [`ui-main-0.6.3.png`](ui-main-0.6.3.png) | 0.6.3 主界面（采麦中 · USB，速率/峰值/心跳） | 界面正常、链路在推 |
-| [`ui-main-0.6.2.png`](ui-main-0.6.2.png) | 0.6.2 首次装机主界面 | 首装可运行 |
+| [`ui-main-0.6.3.png`](ui-main-0.6.3.png) | 0.6.3 主界面（采麦中 · USB，速率/峰值/心跳；状态栏第三方通知图标已打码） | 界面正常、链路在推 |
+| [`ui-main-0.6.2.png`](ui-main-0.6.2.png) | 0.6.2 首次装机主界面（状态栏第三方通知图标已打码） | 首装可运行 |
 | [`launcher-icon.png`](launcher-icon.png) | 桌面「桥」图标 + 名称（已裁剪） | 图标正常 |
-| [`fg-service-notification.png`](fg-service-notification.png) | 前台服务常驻通知（已裁剪） | 0.6.3 修复手段生效 |
+| [`fg-service-notification.png`](fg-service-notification.png) | 前台服务常驻通知（仅保留本条卡片） | 0.6.3 修复手段生效 |
+
+脱敏说明：两张主界面截图的状态栏只保留时间、系统状态图标与麦克风隐私指示点，
+第三方 App 的通知图标已用底色覆盖；`launcher-icon.png` 仅裁图标与名称；
+`fg-service-notification.png` 仅保留本条通知卡片，下方其它通知已裁掉。
 
 ## 8. 未验证 / 限制
 
