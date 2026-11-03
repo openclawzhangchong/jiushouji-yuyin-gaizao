@@ -29,3 +29,7 @@ build_tmp/
 # 例外：Windows 安装版的打包配置要入库（其余 .spec 仍忽略）
 !packaging/*.spec
 cap_probe.wav
+
+# 品牌资产的查/备选稿，留在本地不入库
+assets/brand/preview-small.png
+assets/brand/micbridge-appicon-alt-light.png
