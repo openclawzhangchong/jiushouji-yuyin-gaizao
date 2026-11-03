@@ -1,5 +1,6 @@
 # 构建产物
 out/
+out-a16/
 mic-bridge.apk
 mic-bridge.apk.idsig
 *.idsig
@@ -25,4 +26,6 @@ artifacts/
 dist/
 build_tmp/
 *.spec
+# 例外：Windows 安装版的打包配置要入库（其余 .spec 仍忽略）
+!packaging/*.spec
 cap_probe.wav

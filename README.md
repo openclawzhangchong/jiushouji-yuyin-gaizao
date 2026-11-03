@@ -137,6 +137,44 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 
 ---
 
+## 两个 APK 变体：旧机用 legacy，Android 16 用 modern
+
+两套产物并存，构建互不影响，**不会覆盖对方**：
+
+| 变体 | 适用设备 | 产物 | 包名 / versionCode | minSdk | targetSdk | 签名 |
+|---|---|---|---|---|---|---|
+| **legacy（旧手机/旧平板首选）** | Android 5.0+；MTK 旧机、低内存、旧系统 | `release/mic-bridge-0.5.0.apk`（20,890 B） | `com.zcstudy.micbridge` / 8 | 21 | 22 | 已签 |
+| modern（Android 16） | Android 16（API 36），同时兼容 5.0+ | `release/mic-bridge-a16-0.6.0.apk`（24,983 B） | `com.zcstudy.micbridge.a16` / 9 | 21 | 36 | 已签（同一把钥匙） |
+
+- **legacy 是旧设备的推荐版本**：完全沿用原 `minSdk 21` / `targetSdk 22`，安装时自动授权、无运行时权限弹窗，
+  针对旧机型做过验证；同包名 + `versionCode 8`，老用户可直接覆盖升级。
+- modern 用独立包名 `.a16`，可与 legacy **并存安装**，不会覆盖老用户已装的 App；按 Android 15/16 要求补了
+  edge-to-edge insets、运行时 `RECORD_AUDIO` 与 `READ_MEDIA_AUDIO` 授权。效果见下方"变体差异"。
+- 构建：`bash build.sh`（legacy，写 `out/` + `release/mic-bridge-<VER>.apk`）；
+  `bash build_android16.sh`（modern，写 `out-a16/` + `release/mic-bridge-a16-<VER>.apk`）。
+- modern 工具链独立放在 `C:\android-build\android-16`（build-tools 36.0.0）与
+  `C:\android-build\android-36`（Platform 36），与 legacy 的 `android-14` / `android-5.0.1` 并存。
+- modern 安装/启动：
+
+```powershell
+adb install -r release\mic-bridge-a16-0.6.0.apk
+adb shell am start -n com.zcstudy.micbridge.a16/com.zcstudy.micbridge.MainActivity --ez auto true
+```
+
+### modern 变体差异（仅影响 `.a16`）
+
+| Android 15/16 变更 | modern 的处理 | legacy |
+|---|---|---|
+| targetSdk 35+ 强制 edge-to-edge | 根视图按 `systemBars`/刘海 insets 补 padding（API<30 回退旧 insets 接口） | 不涉及（targetSdk 22 仍由系统自动避让） |
+| `RECORD_AUDIO` 运行时权限 | 点"开始送话"前申请，拒绝时状态栏提示 | 安装时授权，无需申请 |
+| 共享存储读音频收紧 | Android 13+ 用 `READ_MEDIA_AUDIO`，外放自测前申请 | 旧 `READ_EXTERNAL_STORAGE` 安装时授权 |
+| 大屏忽略 `screenOrientation` | 声明 `configChanges`，旋转不重建 Activity，推流不中断 | 不涉及 |
+
+modern 无 `Service`、无通知、无精确闹钟、无无障碍/悬浮窗，因此**不涉及**前台服务类型、`POST_NOTIFICATIONS`、精确闹钟权限。
+包内**没有 `.so`**（纯 Java），已按 `zipalign -P 16` 对齐，16KB page size 要求不适用。
+
+---
+
 ## 文件清单
 
 | 文件 | 作用 |
@@ -144,14 +182,17 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 | `app/AndroidManifest.xml` | 权限 RECORD_AUDIO / INTERNET / WAKE_LOCK / READ_EXTERNAL_STORAGE，minSdk 21 |
 | `app/src/com/zcstudy/micbridge/Bridge.java` | 采麦 → 20ms 分包 → TCP 推流；退避重连；`PARTIAL_WAKE_LOCK`；每 5 秒 logcat 心跳；标定音注入 |
 | `app/src/com/zcstudy/micbridge/MainActivity.java` | 纯代码搭 UI（不依赖布局 XML，绕开 aapt2 丢 theme 的坑）：大开关 + 28 段电平 + 状态行 + 标定音 + **外放自测** + 音源切换；支持 intent 无人值守 |
-| `build.sh` | 无 Gradle / 无 Android Studio 出包链：`aapt2 → javac → d8 → zipalign → apksigner` |
+| `build.sh` | legacy 出包链：`aapt2 → javac → d8 → zipalign → apksigner`（minSdk 21 / targetSdk 22，**未改动**） |
+| `build_android16.sh` | modern（Android 16）出包链：targetSdk 36，独立输出 `out-a16/` 与 `release/mic-bridge-a16-*.apk` |
+| `app/src-modern/` | modern 变体覆盖：独立 Manifest（包名 `.a16`）+ MainActivity（insets/运行时权限）；legacy 不编译它 |
 | `pc_receiver.py` | `adb reverse` 管理 + TCP 收流 + 弹性缓冲 + 播进 CABLE Input + 状态打印 + 可选同时录音（`--record`） |
 | `启动接收端.bat` | 双击启动接收端 |
 | `setup_windows.ps1` | 新机一键搭环境（默认 DRY-RUN，`-Go` 才装，`-WithBuild` 附带构建链） |
 | `run_selftest.sh` | 无人值守回归：平板自己外放已知音频、自己听回来、PC 录下、出数字 |
 | `acoustic_probe.py` / `look.py` | 声学回环与包络/频谱分析 |
 | `spike/` | **丢弃型**验证脚本，结论已冻结在 `PLAN.md`，别当实现参考（见 `spike/README.md`） |
-| `release/mic-bridge-0.5.0.apk` | 当前装机版本（20.9 KB，含签名） |
+| `release/mic-bridge-0.5.0.apk` | 当前装机版本（20.9 KB，含签名）；legacy 最新产物，旧机推荐 |
+| `release/mic-bridge-a16-0.6.0.apk` | modern 产物（24.9 KB，含签名，Android 16 用；包名 `.a16` 可并存） |
 | `installer/` | 中文安装包脚本（Inno Setup 7）：`installer.iss`、启动脚本、使用说明 |
 | `PLAN.md` | 决策与实测台账：每条结论带出处 |
 | `AGENTS.md` | **给接手的 AI/程序员的硬约束与禁止事项，动手前先读这个** |
@@ -302,4 +343,67 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity \
 - WiFi 链路自动用更大的抖动缓冲（目标 250ms，实测稳定在 300-340ms），
   因为这条链路会偶发 100-250ms 的打嗝（见 `docs/验收记录.md`）。
 - 拔掉数据线不影响推流，但平板就靠电池了；长期用建议保留线供电。
+
+---
+
+## Windows 安装版 / 开机自启（新增，桌面端）
+
+> 说明：**Android 端、旧版 APK 与旧配置完全没动**——`release/` 里的历史 APK、`build.sh` 出包链、
+> 上面「手机端不方便下载 APK」那一节都保持原样；旧机仍然优先用仓库里既有的旧 APK + 旧配置。
+> 本节只讲 Windows 侧新增的"正式安装包 + 开机自启"。
+
+### 安装（每用户，不弹 UAC）
+
+```powershell
+# 产物：dist\windows\Jiushouji-Mic-Setup-<版本>.exe（与 Android 产物分开存放）
+# 双击安装即可；装到 %LOCALAPPDATA%\Programs\MicBridge，不需要管理员
+.\dist\windows\Jiushouji-Mic-Setup-1.0.exe
+```
+
+安装包提供：桌面快捷方式（可选）、开始菜单项、「应用和功能」里的卸载项、
+以及默认勾选的**开机自启**（登录时静默进托盘，不弹模式选择窗、不抢焦点）。
+安装器默认语言为中文，也可切换英文。
+
+静默验证（装到临时目录，验证后可完全卸载）：
+
+```powershell
+$s = ".\dist\windows\Jiushouji-Mic-Setup-1.0.exe"
+& $s /VERYSILENT /SUPPRESSMSGBOXES /DIR "$env:TEMP\micbridge-test" /NOICONS
+& "$env:TEMP\micbridge-test\unins000.exe" /VERYSILENT
+```
+
+### 开机自启怎么开 / 怎么关
+
+- **安装时**：安装向导「开机自启」复选框，默认勾选；不勾就不写自启项。
+- **装好之后**：右键任务栏右下角托盘图标 →「开机自启（登录时静默启动）」，勾选状态即当前开关。
+- 实现方式：只写 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下 `MicBridgeReceiver`
+  这一条（`"{安装目录}\mic-bridge-receiver.exe" --login`）。
+  **不写 HKLM、不建服务、不需要管理员** —— 这既符合"可配置、可关闭"，也避开杀软最敏感的行为。
+- 命令行的 `--no-autostart` 是**另一件事**（不给平板自动下发送话指令），与登录自启无关；
+  登录自启由 `--login` 标识。
+
+### 重新打安装包
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\build_installer.ps1
+# 可选：-Version 1.0.1、-Sign（配合代码签名证书，见下）
+```
+
+构建链：PyInstaller（**onedir、关 UPX**）→ Inno Setup 6（`ISCC.exe`）。
+产物统一在 `dist\windows\`，不会覆盖 `dist\mic-bridge-receiver.exe` 等旧的一次性单文件产物。
+
+### 关于杀软误报（务必读）
+
+未签名的 PyInstaller 程序仍**可能**被个别引擎误报，本项目已做的降低措施：
+
+- 用 **onedir**（不再"每次启动自解压到 %TEMP% 再执行"）——这是最有效的启发式规避；
+- **关闭 UPX** 压缩；带图标 + 完整版本信息（产品名/版本/发布者）；
+- 只用 HKCU 的 Run 项，不写 HKLM、不注册服务、不做隐藏窗口常驻、不动态下载执行；
+- 安装包与主程序都可以用 `signtool` 签名（见 `packaging\build_installer.ps1 -Sign`）。
+
+没有代码签名证书时，误报仍可能出现。正确处理方式：把文件提交到
+[Microsoft Defender 误报申诉](https://www.microsoft.com/en-us/wdsi/filesubmission)、
+用 VirusTotal 多引擎确认是哪些引擎误报，并在自己机器上给安装目录/程序添加排除项。
+**不要**用加壳、混淆、改哈希之类手段"躲"杀软——那会加重误报。
+
 
