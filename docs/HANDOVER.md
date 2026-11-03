@@ -82,11 +82,13 @@ Windows 侧是 **0.7.2 per-user 安装包**，托盘常驻、无控制台窗口�
 
 | 分支 | 与 main 的关系 | 是什么 | 处置建议 |
 |---|---|---|---|
-| `feat/android16-build` | main 领先 10、分支领先 0（提交已全部在 main 历史里） | A16 modern 变体开发过程 | 可删；删前 `git branch -d` 确认已并入 |
-| `feat/win-install-port` | main 领先 8、分支领先 0（已全部并入） | per-user 安装包移植过程 | 可删；同上 |
-| `feat/windows-install-autostart` | main 领先 22、分支领先 8（已分叉） | 早期 Windows 安装版实现（admin 安装、HKCU Run 自启、onefile），已被 main 的 per-user 链路取代 | **保留作备份，不要合进 main**；确认不再需要后再删 |
-| `chore/a16-icon-sync` | 已并入 main（领先 0） | 图标定稿与 0.6.2 重出 | 可删 |
-| `fix/silent-foreground` | main 领先 1、分支领先 0（已并入） | v0.7.1 消黑框过程 | 可删 |
+| `feat/android16-build` | 分支领先 0（未合并提交 0，已全部在 main 历史里） | A16 modern 变体开发过程 | 可删；删前 `git branch -d` 确认已并入 |
+| `feat/win-install-port` | 分支领先 0（未合并提交 0，已全部并入） | per-user 安装包移植过程 | 可删；同上 |
+| `feat/windows-install-autostart` | 分支领先 8（未合并提交 8，已分叉） | 早期 Windows 安装版实现（admin 安装、HKCU Run 自启、onefile），已被 main 的 per-user 链路取代 | **保留作备份，不要合进 main**；确认不再需要后再删 |
+| `chore/a16-icon-sync` | 分支领先 0（未合并提交 0，已并入） | 图标定稿与 0.6.2 重出 | 可删 |
+| `fix/silent-foreground` | 分支领先 0（未合并提交 0，已并入） | v0.7.1 消黑框过程 | 可删 |
+
+> 表中只记「分支领先 main」的未合并提交数（判断能不能删就看它）；`main` 领先多少会随每次文档提交递增，不写死，需要时用 `git rev-list --count origin/main..<branch>` 现查。
 
 ---
 
