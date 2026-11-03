@@ -282,7 +282,8 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity \
 ### 怎么打出这个 EXE
 
 ```bash
-# platform-tools\ 里放 adb.exe / AdbWinApi.dll / AdbWinUsbApi.dll（从 Android SDK 复制，已 gitignore）
+# 仓库不含 platform-tools\：打包脚本按该目录存在与否条件打包（存在才带 adb）
+# 日后要内置 adb.exe / AdbWinApi.dll / AdbWinUsbApi.dll，需自行新建该目录（从 Android SDK 复制），并自行决定是否加入 .gitignore
 pyinstaller --onefile --console --name mic-bridge-receiver \
     --add-data "<绝对路径>/release/mic-bridge-0.5.0.apk;." \
     --add-data "<绝对路径>/platform-tools;platform-tools" pc_receiver.py
