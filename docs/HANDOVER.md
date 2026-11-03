@@ -169,10 +169,15 @@ powershell -ExecutionPolicy Bypass -File .\packaging\build_installer.ps1
 ## 7. 已知待验证 / 未完成
 
 - **A16 版已在 Android 12 真机验证通过（见实测记录），Android 16 仍未验证**：
-  0.6.2 / 0.6.3-a16 在 realme RMX3161（Android 12 / API 31）上完成安装、联调、截图与息屏复测，
+  0.6.2 / 0.6.3 / 0.6.4-a16 在 realme RMX3161（Android 12 / API 31）上完成安装、联调、截图与息屏复测，
   记录见 `docs/real-device-tests/2026-11-03-realme-RMX3161-android12/README.md`。
   期间发现并修复了「Android 11+ 息屏后录音被判 silenced」的问题（0.6.3 加 microphone 前台服务，
-  仅改 `app/src-modern/`）。**Android 16（API 36）真机仍无运行记录**，真机验证前不要对外称"已支持 Android 16"。
+  0.6.4 再把服务生命周期与"是否真的收到 PC 心跳"绑定，仅改 `app/src-modern/`，legacy 等价性哈希已证明）。
+  **Android 16（API 36）真机仍无运行记录**，真机验证前不要对外称"已支持 Android 16"。
+- **已知低优先级缺陷（未修，0.6.4 复核遗留）**：
+  1. `Bridge.stop()` 仍在主线程 `join(1500)`，点「停止送话」最多卡 UI 1.5s；改后台停止需引入线程状态机与按钮防重入。
+  2. `MicService` 用 `START_NOT_STICKY`，进程被 ColorOS 省电策略杀掉后不会自动恢复送话，需用户重新点开始。
+  3. Android 13+ 未授予 `POST_NOTIFICATIONS` 时前台服务通知不可见（送话仍有效）；Android 16 的 FGS 启动限制/edge-to-edge 未真机验证。
 - **安装包未代码签名**：自用场景接受 SmartScreen 提示；要分发需补证书并走 `-Sign`。
 - **`platform-tools` 未内置**：仓库根目录当前没有 `platform-tools/`，`mic_bridge_receiver.spec`
   只在目录存在时才打包 adb。分发前需补齐 `adb.exe`、`AdbWinApi.dll`、`AdbWinUsbApi.dll`。

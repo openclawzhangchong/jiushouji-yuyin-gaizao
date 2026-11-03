@@ -56,4 +56,16 @@ public class MicService extends Service {
     public int onStartCommand(Intent i, int flags, int startId) {
         return START_NOT_STICKY;
     }
+
+    /** 进程异常终止前也要把常驻通知撤掉，避免残留"正在送话"。 */
+    @Override
+    public void onDestroy() {
+        if (Build.VERSION.SDK_INT >= 24) {
+            stopForeground(STOP_FOREGROUND_REMOVE);
+        } else {
+            stopForeground(true);
+        }
+        stopSelf();
+        super.onDestroy();
+    }
 }

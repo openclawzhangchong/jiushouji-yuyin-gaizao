@@ -50,8 +50,8 @@ echo "[2/6] aapt2 link (minSdk 21 / targetSdk 36 / pkg $PKG)"
     --java "$OUT/gen" --min-sdk-version 21 --target-sdk-version 36 \
     --version-code "$VC" --version-name "$VN"
 
-echo "[3/6] javac（modern MainActivity 覆盖 legacy 同名类，Bridge 共用）"
-SRC=$(find "$MODERN/java" -name "*.java"; find app/src -name "*.java" ! -name "MainActivity.java")
+echo "[3/6] javac（modern 覆盖 MainActivity/Bridge，legacy 其余类共用）"
+SRC=$(find "$MODERN/java" -name "*.java"; find app/src -name "*.java" ! -name "MainActivity.java" ! -name "Bridge.java")
 javac --release 8 -nowarn -encoding UTF-8 -classpath "$AJ" -d "$OUT/classes" \
     $SRC $(find "$OUT/gen" -name "*.java")
 

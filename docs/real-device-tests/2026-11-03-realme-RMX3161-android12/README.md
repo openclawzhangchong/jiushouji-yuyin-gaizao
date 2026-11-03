@@ -173,3 +173,81 @@ session:66649 ... pack:com.zcstudy.micbridge.a16 ... silenced:false
   与「应用被划掉后」的存活未测；如需长期常驻，建议在系统设置里允许该 App 后台运行/自启动。
 - **外放自测**未跑（需要 `READ_EXTERNAL_STORAGE` + `/sdcard/Music/demo.wav`，本次未授予/未推送）。
   `READ_EXTERNAL_STORAGE` 仍为 `granted=false`，与主链路无关。
+
+---
+
+## 9. 0.6.4 前台服务生命周期修复（2026-11-03 复测）
+
+### 9.1 修了什么
+
+独立复核报出 5 个缺陷（2 个中级）。修法按要求走**变体覆盖**：新增
+`app/src-modern/java/com/zcstudy/micbridge/Bridge.java`（modern 专用副本），
+`build_android16.sh` 的 javac 同步排除 legacy 的 `Bridge.java`；
+`app/src/`、`app/AndroidManifest.xml`、`build.sh`、`release/mic-bridge-0.5.0.apk` **零改动**。
+
+| 缺陷 | 修法 |
+|---|---|
+| 异常路径漏 wakelock、`running`/状态不回落 | `run()` 外层兜底 `Throwable`：`running=false`、`releaseWake()`、状态写「已停止（异常：…）」、`Log.e` 带栈，并通知 UI 撤服务 |
+| 先起前台服务、后起 Bridge，初始化失败服务常驻 | `Bridge.start(Listener)` 回传结果；**收到 PC 第一个心跳（真实数据流）才** `startForeground`，断线立即撤通知并释放 wakelock（重连成功再抬回前台） |
+| `MicService` 异常终止残留通知 | `onDestroy()` 里 `stopForeground(STOP_FOREGROUND_REMOVE)` + `stopSelf()` |
+| Android 13+ 未运行时申请通知权限 | `MainActivity` 在开始送话前申请 `POST_NOTIFICATIONS`（拒绝只影响通知可见性，不阻塞送话） |
+
+### 9.2 legacy 等价性证明
+
+用隔离副本（`build.sh` + 原样 `app/`）以 `VER=0.5.0 VC=8` 重建 legacy，与
+`release/mic-bridge-0.5.0.apk` 内的条目逐一比对 SHA-256：
+
+| 条目 | 原 0.5.0 APK | 重建产物 | 一致 |
+|---|---|---|---|
+| `classes.dex` | `557BCB1CE1CA3250D9576CE8460A083CA5BA8D9E84A18C4884EE21B4EA0F6EAC` | 同左 | ✅ |
+| `resources.arsc` | `ACB4A519A871C87AF4E678A02FB8C4435DF0D6A74A1FAC8C8984D248E8D6C4E5` | 同左 | ✅ |
+| `AndroidManifest.xml` | `B272CAD0C413B4F6C047DD04BD77CC91D0E03393511D29B9966FFF50DD35E638` | 同左 | ✅ |
+
+`release/mic-bridge-0.5.0.apk` 文件级 SHA-256 全程未变：
+`3CFFC2B0438DF00EC38FEF1619B70D5AF55241EBDF50B86C2FCB4DAC402C2B92`（未重写该文件）。
+重建产物的整包哈希会因签名时间戳不同，因此以**内嵌条目哈希**为准。
+
+### 9.3 真机复测（realme RMX3161 / Android 12，0.6.4-a16 / VC13）
+
+**① 正常送话**（`ui-main-0.6.4.png`）：
+
+```
+心跳 已推 92s 累计 2003200B 速率 32000B/s 峰值 71 欠采 0 重连 7 链路 USB 状态 采麦中 · USB
+dumpsys activity services → isForeground=true（front-of-task 前台服务）
+PC 端 mic-bridge-receiver：累计 92s / 32016 B/s（真实收到，非内核缓冲区）
+```
+
+**② 息屏 30 秒**（每 10 秒采样）：
+
+```
+[10s] silenced=false 峰值 722   速率 32000B/s
+[20s] silenced=false 峰值 284   速率 32000B/s
+[30s] silenced=false 峰值 2989  速率 32000B/s
+dumpsys power: mWakefulness=Asleep；micbridge:up 仅在采麦期间持有
+```
+
+**③ 失败态**（停掉 PC 接收端，模拟「对端不可用/断线」）：
+
+```
+MICBRIDGE: 断开/连不上：java.io.IOException: Broken pipe  1000ms 后重试
+dumpsys activity services com.zcstudy.micbridge.a16 → 空（前台服务已停、通知已撤）
+dumpsys power | grep micbridge:up → 连续 3 次采样均为空（wakelock 未持有）
+pidof com.zcstudy.micbridge.a16 → 进程存活；logcat 无 FATAL EXCEPTION / ANR
+```
+
+失败态界面（`ui-fail-0.6.4.png`）显示「等待电脑端 (Broken pipe)」「上行 0 B/s」「还没连上」，
+按钮仍为「停止送话」（采集线程在退避重试）；恢复接收端后自动重连，前台服务与通知自动回来。
+
+> 备注：失败注入用的是**停掉 PC 端接收进程**（不是撤销权限）。该 ROM 的 shell 没有
+> `MANAGE_APP_OPS_MODES` / `REVOKE_RUNTIME_PERMISSIONS`，`cmd appops set` / `pm revoke` 均被拒绝，
+> 无法用 adb 撤销权限。
+
+### 9.4 未修的 3 个低优先级项（已知风险）
+
+1. **`Bridge.stop()` 仍在主线程 join（最长 1500ms）**：点「停止送话」时 UI 线程最多阻塞 1.5s。
+   0.6.4 未改为后台停止（改法要引入线程状态机与按钮防重入，超出本次范围），列为此后优化项。
+2. **`MicService` 用 `START_NOT_STICKY`**：进程被 ColorOS 省电策略杀掉后服务不会自动重建，
+   需要用户重新点「开始送话」；长期常驻仍建议在系统里允许后台运行/自启动。
+3. **Android 13+ 通知权限/Android 16 行为未真机验证**：已补运行时申请，但不授予时通知不可见；
+   Android 16 的 FGS 启动限制、edge-to-edge 强制仍无实机数据。
+

@@ -260,3 +260,29 @@ Release 里标注「旧机推荐 / Legacy」的 `mic-bridge-0.5.0.apk` 就是这
 **注意**
 - 新产物 `release/mic-bridge-a16-0.6.3.apk`（95,328 B）。
 - Android 16（API 36）真机仍**未**验证；Android 13+ 需授予通知权限，否则前台服务通知不可见（服务仍有效）。
+
+### v0.6.4-a16：前台服务生命周期与异常兜底修复（2026-11-03）
+
+**修复（仅 `app/src-modern/`，legacy 零改动）**
+- 新增 modern 专用 `Bridge.java`（变体覆盖；`build_android16.sh` 的 javac 同步排除 legacy `Bridge.java`）。
+- `run()` 外层兜底 `Throwable`：异常不再逃逸，必定 `running=false`、释放 wakelock、状态回落并 `Log.e` 记栈。
+- `Bridge.start(Listener)` 回传初始化结果：**收到 PC 第一个心跳才**起 microphone 前台服务/通知；
+  断线立即撤服务与通知并释放 wakelock（重连成功自动恢复），不再出现服务常驻与状态闪烁。
+- `MicService.onDestroy()` 补 `stopForeground(STOP_FOREGROUND_REMOVE)` + `stopSelf()`。
+- Android 13+ 开始送话前运行时申请 `POST_NOTIFICATIONS`（拒绝不阻塞送话）。
+
+**legacy 等价性**
+- 隔离副本用 `build.sh`（`VER=0.5.0 VC=8`）重建，与 `release/mic-bridge-0.5.0.apk` 比对：
+  `classes.dex` / `resources.arsc` / `AndroidManifest.xml` 的 SHA-256 **完全一致**（见实测记录 9.2）；
+  `release/mic-bridge-0.5.0.apk` 字节未变。
+
+**真机复测（realme RMX3161 / Android 12，API 31）**
+- 正常送话：32,000 B/s，峰值非 0，前台服务 `isForeground=true`。
+- 息屏 30 秒：`silenced:false`，峰值 722 / 284 / 2989，零欠采。
+- 失败态（停掉 PC 接收端）：前台服务停、通知撤、`micbridge:up` 未持有、进程存活、无 FATAL。
+- 截图与命令原文：`docs/real-device-tests/2026-11-03-realme-RMX3161-android12/` 第 9 节。
+
+**注意**
+- 新产物 `release/mic-bridge-a16-0.6.4.apk`（99,425 B，VC13）。
+- 仍有 3 个低优先级已知项（`Bridge.stop()` 主线程 join、`START_NOT_STICKY` 不自恢复、
+  Android 13+ 通知权限/Android 16 未真机验证），详见实测记录 9.4。

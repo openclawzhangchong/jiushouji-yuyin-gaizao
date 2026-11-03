@@ -146,7 +146,7 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 | 变体 | 适用设备 | 产物 | 包名 / versionCode | minSdk | targetSdk | 签名 |
 |---|---|---|---|---|---|---|
 | **legacy（旧手机/旧平板首选）** | Android 5.0+；MTK 旧机、低内存、旧系统 | `release/mic-bridge-0.5.0.apk`（20,890 B） | `com.zcstudy.micbridge` / 8 | 21 | 22 | 已签 |
-| modern（Android 16） | Android 16（API 36），同时兼容 5.0+ | `release/mic-bridge-a16-0.6.3.apk`（95,328 B） | `com.zcstudy.micbridge.a16` / 12 | 21 | 36 | 已签（同一把钥匙） |
+| modern（Android 16） | Android 16（API 36），同时兼容 5.0+ | `release/mic-bridge-a16-0.6.4.apk`（99,425 B） | `com.zcstudy.micbridge.a16` / 13 | 21 | 36 | 已签（同一把钥匙） |
 
 - **legacy 是旧设备的推荐版本**：完全沿用原 `minSdk 21` / `targetSdk 22`，安装时自动授权、无运行时权限弹窗，
   针对旧机型做过验证；同包名 + `versionCode 8`，老用户可直接覆盖升级。
@@ -162,7 +162,7 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 - modern 安装/启动：
 
 ```powershell
-adb install -r release\mic-bridge-a16-0.6.3.apk
+adb install -r release\mic-bridge-a16-0.6.4.apk
 adb shell am start -n com.zcstudy.micbridge.a16/com.zcstudy.micbridge.MainActivity --ez auto true
 ```
 
@@ -174,7 +174,7 @@ adb shell am start -n com.zcstudy.micbridge.a16/com.zcstudy.micbridge.MainActivi
 | `RECORD_AUDIO` 运行时权限 | 点"开始送话"前申请，拒绝时状态栏提示 | 安装时授权，无需申请 |
 | 共享存储读音频收紧 | Android 13+ 用 `READ_MEDIA_AUDIO`，外放自测前申请 | 旧 `READ_EXTERNAL_STORAGE` 安装时授权 |
 | 大屏忽略 `screenOrientation` | 声明 `configChanges`，旋转不重建 Activity，推流不中断 | 不涉及 |
-| Android 11+ 后台/息屏录音被静音 | 0.6.3 起用 `foregroundServiceType=microphone` 的前台服务（`MicService` + 常驻通知） | 不涉及（Android 5.1 无此限制） |
+| Android 11+ 后台/息屏录音被静音 | 0.6.3 起用 `foregroundServiceType=microphone` 的前台服务（`MicService` + 常驻通知）；0.6.4 起"收到 PC 心跳才算送话成立"，断线即刻撤服务/通知并释放 wakelock | 不涉及（Android 5.1 无此限制） |
 
 modern 唯一的 `Service` 就是送话期间的麦克风前台服务；`POST_NOTIFICATIONS` 只在 Android 13+ 需要
 用户授予（不授予则通知不可见，服务本身仍有效），不涉及精确闹钟、无障碍/悬浮窗。
@@ -191,7 +191,7 @@ modern 唯一的 `Service` 就是送话期间的麦克风前台服务；`POST_NO
 | `app/src/com/zcstudy/micbridge/MainActivity.java` | 纯代码搭 UI（不依赖布局 XML，绕开 aapt2 丢 theme 的坑）：大开关 + 28 段电平 + 状态行 + 标定音 + **外放自测** + 音源切换；支持 intent 无人值守 |
 | `build.sh` | legacy 出包链：`aapt2 → javac → d8 → zipalign → apksigner`（minSdk 21 / targetSdk 22，**未改动**） |
 | `build_android16.sh` | modern（Android 16）出包链：targetSdk 36，独立输出 `out-a16/` 与 `release/mic-bridge-a16-*.apk` |
-| `app/src-modern/` | modern 变体覆盖：独立 Manifest（包名 `.a16`）+ MainActivity（insets/运行时权限）+ `MicService`（送话期间的麦克风前台服务）；legacy 不编译它 |
+| `app/src-modern/` | modern 变体覆盖：独立 Manifest（包名 `.a16`）+ MainActivity（insets/运行时权限/通知权限）+ `Bridge`（异常兜底与初始化回传）+ `MicService`（送话期间的麦克风前台服务）；legacy 不编译这些同名类 |
 | `pc_receiver.py` | `adb reverse` 管理 + TCP 收流 + 弹性缓冲 + 播进 CABLE Input + 状态打印 + 可选同时录音（`--record`） |
 | `启动接收端.bat` | 双击启动接收端 |
 | `setup_windows.ps1` | 新机一键搭环境（默认 DRY-RUN，`-Go` 才装，`-WithBuild` 附带构建链） |
@@ -199,7 +199,7 @@ modern 唯一的 `Service` 就是送话期间的麦克风前台服务；`POST_NO
 | `acoustic_probe.py` / `look.py` | 声学回环与包络/频谱分析 |
 | `spike/` | **丢弃型**验证脚本，结论已冻结在 `PLAN.md`，别当实现参考（见 `spike/README.md`） |
 | `release/mic-bridge-0.5.0.apk` | 当前装机版本（20.9 KB，含签名）；legacy 最新产物，旧机推荐 |
-| `release/mic-bridge-a16-0.6.3.apk` | modern 产物（95.3 KB，含签名与定稿品牌图标，Android 16 用；包名 `.a16` 可并存） |
+| `release/mic-bridge-a16-0.6.4.apk` | modern 产物（99.4 KB，含签名与定稿品牌图标，Android 16 用；包名 `.a16` 可并存） |
 | `installer/` | 中文安装包脚本（Inno Setup 7）：`installer.iss`、启动脚本、使用说明 |
 | `PLAN.md` | 决策与实测台账：每条结论带出处 |
 | `AGENTS.md` | **给接手的 AI/程序员的硬约束与禁止事项，动手前先读这个** |

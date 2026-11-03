@@ -46,6 +46,7 @@ public class MainActivity extends Activity {
     public static final String DEMO_DEFAULT = "/sdcard/Music/demo.wav";
     private static final int REQ_MIC = 101;
     private static final int REQ_READ = 102;
+    private static final int REQ_NOTIF = 103;
     private String demoPath = DEMO_DEFAULT;
 
     private Bridge bridge;
@@ -220,11 +221,43 @@ public class MainActivity extends Activity {
                 paint();
                 return;
             }
-            startMicService();
-            bridge.start();
+            startNotifPermission();
+            bridge.start(initListener);
             btnToggle.setText("停止送话");
         }
         paint();
+    }
+
+    /**
+     * Bridge 在采集线程里回传初始化结果：成功才起 microphone 前台服务；
+     * 首次失败（权限/初始化异常等）就停服务、撤通知，避免通知与前台服务长期挂着。
+     */
+    private final Bridge.Listener initListener = new Bridge.Listener() {
+        @Override
+        public void onInitResult(final boolean ok, final String reason) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    if (ok) {
+                        startMicService();
+                    } else {
+                        stopMicService();
+                        log("初始化失败，前台服务已撤：" + reason);
+                    }
+                    // 采集线程可能仍在退避重试，按 running 决定按钮文案
+                    btnToggle.setText(bridge.isRunning() ? "停止送话" : "开始送话");
+                    paint();
+                }
+            });
+        }
+    };
+
+    /** Android 13+ 通知权限：不授予只是通知不可见，前台服务本身照常生效。 */
+    private void startNotifPermission() {
+        if (Build.VERSION.SDK_INT >= 33
+                && !hasPermission(Manifest.permission.POST_NOTIFICATIONS)) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+        }
     }
 
     /** 抬到 microphone 前台服务：Android 11+ 息屏后只有前台服务能继续采麦。 */
@@ -252,6 +285,9 @@ public class MainActivity extends Activity {
         } else if (code == REQ_READ) {
             if (ok) selfTest();
             else log("读取音频权限被拒绝，外放自测不可用；可 adb push 到应用私有目录");
+        } else if (code == REQ_NOTIF) {
+            // 拒绝只影响通知可见性，前台服务仍有效
+            if (!ok) log("POST_NOTIFICATIONS 被拒绝：前台服务通知不可见，送话不受影响");
         }
     }
 
@@ -263,7 +299,7 @@ public class MainActivity extends Activity {
                 : MediaRecorder.AudioSource.VOICE_COMMUNICATION;
         btnSrc.setText("音源：" + Bridge.srcName(bridge.source) + "（点击切换）");
         if (wasRunning) {
-            bridge.start();
+            bridge.start(initListener);
             btnToggle.setText("停止送话");
         }
     }
@@ -393,7 +429,7 @@ public class MainActivity extends Activity {
                         btn.setText("WiFi 兜底：电脑 IP = " + (v.length() == 0 ? "未设置" : v));
                         if (bridge.isRunning()) {          // 重选链路
                             bridge.stop();
-                            bridge.start();
+                            bridge.start(initListener);
                         }
                         paint();
                     }
