@@ -2,8 +2,8 @@
 # 而不是一堆空字段的匿名二进制 —— 这既方便用户在"属性"里核对，也能少挨一些误报。
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(0, 7, 0, 0),
-    prodvers=(0, 7, 0, 0),
+    filevers=(0, 7, 1, 0),
+    prodvers=(0, 7, 1, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -18,12 +18,12 @@ VSVersionInfo(
           '040904B0',
           [StringStruct('CompanyName', 'MicBridge / jiushouji-yuyin-gaizao'),
            StringStruct('FileDescription', '旧平板麦克风桥接收端（Windows）'),
-           StringStruct('FileVersion', '0.7.0.0'),
+           StringStruct('FileVersion', '0.7.1.0'),
            StringStruct('InternalName', 'mic-bridge-receiver'),
            StringStruct('LegalCopyright', 'Open source project; see repository LICENSE/README'),
            StringStruct('OriginalFilename', 'mic-bridge-receiver.exe'),
            StringStruct('ProductName', '旧平板麦克风桥'),
-           StringStruct('ProductVersion', '0.7.0.0')])
+           StringStruct('ProductVersion', '0.7.1.0')])
       ]),
     VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]

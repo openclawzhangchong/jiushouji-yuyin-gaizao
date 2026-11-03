@@ -29,7 +29,7 @@ except Exception:
 
 SR = 16000
 PORT = 5005
-APP_VER = "0.7.0"
+APP_VER = "0.7.1"
 PONG = b"P"                          # 协议：每 2 秒回写 1 字节，平板 6 秒收不到就重选链路
 PONG_EVERY = 2.0
 GAP_MS = 50.0                        # 包间隔超过这个值算一次"网络打嗝"
@@ -38,6 +38,35 @@ ACTIVITY = PKG + "/.MainActivity"
 HERE = os.path.dirname(os.path.abspath(__file__))
 APPDIR = os.path.join(os.environ.get("LOCALAPPDATA") or os.path.expanduser("~"), "mic-bridge")
 LOG_PATH = os.path.join(APPDIR, "receiver.log")
+
+# 打包成 windowed 程序后，父进程没有控制台，任何 console 子进程（adb 等）都会**新开一个黑框**。
+# 所有外部命令必须走下面的封装：CREATE_NO_WINDOW + STARTF_USESHOWWINDOW/SW_HIDE + 标准流丢弃。
+CREATE_NO_WINDOW = 0x08000000
+
+
+def _silent_kw(**over):
+    kw = {}
+    if os.name == "nt":
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = subprocess.SW_HIDE
+        kw.update(creationflags=CREATE_NO_WINDOW, startupinfo=si)
+    if not over.get("capture_output"):
+        kw.setdefault("stdin", subprocess.DEVNULL)
+        kw.setdefault("stdout", subprocess.DEVNULL)
+        kw.setdefault("stderr", subprocess.DEVNULL)
+    kw.update(over)
+    return kw
+
+
+def run_silent(args, **kw):
+    """统一的无窗口 subprocess.run。要读输出就传 stdout=PIPE 或 capture_output=True。"""
+    return subprocess.run(args, **_silent_kw(**kw))
+
+
+def popen_silent(args, **kw):
+    """统一的无窗口 subprocess.Popen。"""
+    return subprocess.Popen(args, **_silent_kw(**kw))
 
 
 class _Tee:
@@ -130,8 +159,7 @@ def adb_candidates():
 def find_adb():
     for c in adb_candidates():
         try:
-            subprocess.run([c, "version"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=8, check=True)
+            run_silent([c, "version"], timeout=8, check=True)
             return c
         except Exception:
             continue
@@ -147,9 +175,8 @@ def adb_has_device(adb):
     if not adb:
         return False
     try:
-        p = subprocess.run([adb, "devices"], stdout=subprocess.PIPE,
-                           stderr=subprocess.DEVNULL, timeout=12,
-                           encoding="utf-8", errors="replace")
+        p = run_silent([adb, "devices"], stdout=subprocess.PIPE, timeout=12,
+                       encoding="utf-8", errors="replace")
     except Exception:
         return False
     return any(l.strip().endswith("\tdevice") for l in (p.stdout or "").splitlines())
@@ -160,8 +187,8 @@ def run_adb(adb, *args):
         # 显式 utf-8 + replace：subprocess 的 text=True 默认按本地代码页（这台是 GBK）解码，
         # 而 adb 会把含中文的 APK 路径原样回显 —— 解码炸了会被下面的 except 吞掉，
         # 表现成"设备检测静默失效"这种最难查的故障。我们只 grep ASCII 关键字，乱码无所谓。
-        r = subprocess.run([adb] + list(args), capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=180)
+        r = run_silent([adb] + list(args), capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=180)
         return (r.stdout or "") + (r.stderr or "")
     except Exception as e:
         return "ERR " + str(e)
@@ -281,7 +308,7 @@ def run_tray(a, st, fatal, core=None, holder=None):
             cmd = [sys.executable, os.path.abspath(__file__), "--bind", new_bind]
         try:
             # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：不挂在新进程的控制台上
-            subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200, close_fds=True)
+            popen_silent(cmd, creationflags=0x00000008 | 0x00000200, close_fds=True)
         except OSError as e:
             st["switching"] = False
             print("!! 切换失败：%s" % e)
@@ -291,13 +318,11 @@ def run_tray(a, st, fatal, core=None, holder=None):
         ic.stop()
 
     def on_show_log(ic, item):
-        cmd = 'Get-Content -LiteralPath "%s" -Encoding UTF8 -Wait -Tail 80' % LOG_PATH
+        # 用记事本看日志：GUI 程序，不会像 `cmd /c start` 那样顺带弹一个命令行窗口
         try:
-            subprocess.Popen(["cmd", "/c", "start", "mic-bridge 诊断日志", "powershell",
-                              "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
-                             creationflags=0x08000000)
+            popen_silent(["notepad.exe", LOG_PATH])
         except OSError as e:
-            print("!! 打不开日志窗口：%s（日志文件在 %s）" % (e, LOG_PATH))
+            print("!! 打不开日志：%s（日志文件在 %s）" % (e, LOG_PATH))
 
     def on_exit(ic, item):
         print("托盘退出")
@@ -689,16 +714,9 @@ def main():
     busy = probe.connect_ex(("127.0.0.1", PORT)) == 0
     probe.close()
     if busy:
-        print("!! 本机 %d 端口已经有进程在监听（多半是上一个接收端没退干净）。" % PORT)
-        print("   先关掉旧的再起，否则新起的这个看着像在跑、其实一个连接都收不到。")
+        print("!! 本机 %d 端口已经有进程在监听（多半是上一个接收端还开着）。" % PORT)
+        print("   本次启动静默退出（不再弹模态框）；托盘图标在右下角 ^ 里。")
         print("   查占用： netstat -ano | findstr :%d" % PORT)
-        try:
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(
-                None, "mic-bridge 接收端已经在运行了。\n\n看屏幕右下角托盘图标（可能在 ^ 隐藏图标里）。",
-                "mic-bridge", 0x40)
-        except Exception:
-            pass
         return 3
 
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -761,6 +779,9 @@ def main():
             t_rec = time.time()
 
         tlast, vlast, vpkts = time.time(), st["recv"], st["pkts"]
+        # 没设备时的 adb 探测做指数退避：2→4→8→16→30s 封顶，连续失败 10 次后不再主动探测，
+        # 只保留 TCP 监听等平板自己连进来。全程只写日志，绝不弹 UI。
+        dev_next, dev_delay, dev_fails = 0.0, 2.0, 0
         try:
             with sd.OutputStream(samplerate=SR, channels=1, dtype="int16",
                                  device=out_idx, callback=cb, blocksize=a.block, latency=lat):
@@ -770,15 +791,25 @@ def main():
                     rate = (st["recv"] - vlast) / max(now - tlast, 1e-6)
                     dpk = st["pkts"] - vpkts
                     tlast, vlast, vpkts = now, st["recv"], st["pkts"]
-                    if adb and st["client"] is None and device_present(adb):
-                        if want_loopback:
-                            run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
-                        if not st["install_tried"]:
-                            st["install_tried"] = True
-                            # 只在没人在推流时动平板，免得为"顺手升级"打断用户正在用的麦克风
-                            threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
-                    elif st["client"] is not None:
+                    if st["client"] is not None:
+                        dev_next, dev_delay, dev_fails = 0.0, 2.0, 0   # 连上了，退避归零
                         st["install_tried"] = False
+                    elif adb and dev_fails < 10 and now >= dev_next:
+                        if device_present(adb):
+                            dev_next, dev_delay, dev_fails = 0.0, 2.0, 0
+                            if want_loopback:
+                                run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
+                            if not st["install_tried"]:
+                                st["install_tried"] = True
+                                # 只在没人在推流时动平板，免得为"顺手升级"打断用户正在用的麦克风
+                                threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
+                        else:
+                            dev_fails += 1
+                            dev_next = now + dev_delay
+                            dev_delay = min(dev_delay * 2, 30.0)
+                            print("[%s] 没检测到平板，%ds 后再探测（第 %d 次，只记日志不弹窗）"
+                                  % (time.strftime("%H:%M:%S"), int(dev_delay), dev_fails),
+                                  flush=True)
                     fb = st["fb"]
                     if not a.no_fallback and not a.record:
                         if fb["on"]:
