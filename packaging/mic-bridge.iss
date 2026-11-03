@@ -10,7 +10,7 @@
 ;   * 卸载由 Inno 自动登记到"应用和功能"，并自动移除上面那个启动快捷方式。
 
 #ifndef AppVersion
-  #define AppVersion "0.7.1"
+  #define AppVersion "0.7.2"
 #endif
 
 #define AppName "旧平板麦克风桥（当前用户）"

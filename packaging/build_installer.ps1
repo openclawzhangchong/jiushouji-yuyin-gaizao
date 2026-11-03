@@ -14,7 +14,7 @@
 # Keep this file PURE ASCII: Windows PowerShell 5.1 reads BOM-less UTF-8 as GBK.
 
 param(
-    [string]$Version = "0.7.1",
+    [string]$Version = "0.7.2",
     [string]$Python = "",
     [switch]$SkipExe,
     [switch]$Sign

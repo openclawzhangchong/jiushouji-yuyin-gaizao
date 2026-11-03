@@ -29,7 +29,7 @@ except Exception:
 
 SR = 16000
 PORT = 5005
-APP_VER = "0.7.1"
+APP_VER = "0.7.2"
 PONG = b"P"                          # 协议：每 2 秒回写 1 字节，平板 6 秒收不到就重选链路
 PONG_EVERY = 2.0
 GAP_MS = 50.0                        # 包间隔超过这个值算一次"网络打嗝"
@@ -67,6 +67,23 @@ def run_silent(args, **kw):
 def popen_silent(args, **kw):
     """统一的无窗口 subprocess.Popen。"""
     return subprocess.Popen(args, **_silent_kw(**kw))
+
+
+def launch_cmd(extra):
+    """拼"拉起自身"的命令行：打包后是 exe，源码跑是 python + 本脚本。"""
+    if getattr(sys, "frozen", False):
+        return [sys.executable] + list(extra)
+    return [sys.executable, os.path.abspath(__file__)] + list(extra)
+
+
+def port_in_use():
+    """5005 上是否已经有人在监听（用来判定"已有实例"以及重启交接时等端口释放）。"""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.6)
+    try:
+        return s.connect_ex(("127.0.0.1", PORT)) == 0
+    finally:
+        s.close()
 
 
 class _Tee:
@@ -248,7 +265,7 @@ def lan_ip():
         s.close()
 
 
-def run_tray(a, st, fatal, core=None, holder=None):
+def run_tray(a, st, fatal, core=None, holder=None, dump_only=False):
     """托盘常驻：图标颜色=状态（绿推流/灰等待/红故障），悬浮提示一句话，右键菜单操作。
     core 是音频主循环（在线程里跑）；fatal 非 None 表示起不来（红盘，只留日志和退出）。"""
     holder = holder if holder is not None else {}
@@ -280,13 +297,14 @@ def run_tray(a, st, fatal, core=None, holder=None):
         return "USB" if a.bind == "auto" else "WiFi"
 
     def text(item=None):
+        head = "麦克风桥 %s" % APP_VER          # tooltip 也带版本：不点开菜单就能看到装的是哪版
         if fatal:
-            return "mic-bridge 故障: %s" % fatal
+            return "%s · 故障: %s" % (head, fatal)
         if st["fb"]["on"]:
-            return "mic-bridge 实体麦兜底中 · %s" % st["fb"]["name"]
+            return "%s · 实体麦兜底中 · %s" % (head, st["fb"]["name"])
         if st["client"] is None:
-            return "mic-bridge 等待平板连接 · %s 模式" % mode()
-        return "mic-bridge 推流中 · %s · %s 模式" % (st["link"].split(" <-")[0], mode())
+            return "%s · 未连接 · %s 模式" % (head, mode())
+        return "%s · 监听中 · %s · %s 模式" % (head, st["link"].split(" <-")[0], mode())
 
     def refresh():
         ic = holder.get("icon")
@@ -302,18 +320,40 @@ def run_tray(a, st, fatal, core=None, holder=None):
     def on_switch(ic, item):
         st["switching"] = True          # 新实例会自己重发 adb reverse，老实例别去删
         new_bind = "auto" if a.bind != "auto" else "0.0.0.0"
-        if getattr(sys, "frozen", False):
-            cmd = [sys.executable, "--bind", new_bind]
-        else:
-            cmd = [sys.executable, os.path.abspath(__file__), "--bind", new_bind]
         try:
             # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：不挂在新进程的控制台上
-            popen_silent(cmd, creationflags=0x00000008 | 0x00000200, close_fds=True)
+            popen_silent(launch_cmd(["--bind", new_bind]),
+                         creationflags=0x00000008 | 0x00000200, close_fds=True)
         except OSError as e:
             st["switching"] = False
             print("!! 切换失败：%s" % e)
             return
         print("切换到 %s 模式，重启接收端" % ("USB" if new_bind == "auto" else "WiFi"))
+        st["alive"] = False
+        ic.stop()
+
+    def on_rescan(ic, item):
+        """中途才插上平板时用：清零失败计数与退避，让 core 循环立刻探测一次。
+        不重启进程、不弹任何窗口，结果只写日志。"""
+        st["rescan"] = True
+        try:
+            ic.title = "麦克风桥 %s · 正在查找设备…" % APP_VER
+            ic.update_menu()
+        except Exception:
+            pass
+        print("[%s] 托盘：重新扫描设备（连接平板）" % time.strftime("%H:%M:%S"), flush=True)
+
+    def on_restart(ic, item):
+        """托盘重启：先拉一个只负责"等端口释放再启动"的交接进程，再优雅退出当前实例。
+        交接进程带 --restart，最多等 8s 让老实例放开 5005，避免双实例/端口冲突。"""
+        try:
+            # 透传原参数（如 --bind），交接进程去掉 --restart 后原样拉起新实例
+            popen_silent(launch_cmd(list(sys.argv[1:]) + ["--restart"]))
+        except OSError as e:
+            print("!! 重启失败：%s" % e)
+            return
+        print("[%s] 托盘：重启程序（交接进程已拉起）" % time.strftime("%H:%M:%S"), flush=True)
+        st["switching"] = True          # 新实例会重发 adb reverse，老实例别先拆隧道
         st["alive"] = False
         ic.stop()
 
@@ -329,14 +369,26 @@ def run_tray(a, st, fatal, core=None, holder=None):
         st["alive"] = False
         ic.stop()
 
+    ver_item = "版本 %s" % APP_VER          # 唯一版本常量：菜单项与 tooltip 都从这里取
     menu = pystray.Menu(
+        pystray.MenuItem(ver_item, None, enabled=False),   # 版本项：不可点击，单独占顶部一行
         pystray.MenuItem(text, None, enabled=False),
         pystray.MenuItem("切换 USB ⇄ WiFi", on_switch,
                          enabled=lambda item: not fatal),
+        pystray.MenuItem("重新扫描设备（连接平板）", on_rescan,
+                         enabled=lambda item: not fatal),
         pystray.MenuItem("显示诊断日志", on_show_log),
         pystray.Menu.SEPARATOR,
+        pystray.MenuItem("重启程序", on_restart),
         pystray.MenuItem("退出", on_exit),
     )
+    if dump_only:
+        # --dump-menu：不建图标、不占端口，只把**真实注册**的菜单项与 tooltip 打进日志
+        for it in menu.items:
+            en = it.enabled if isinstance(it.enabled, bool) else "动态"
+            print("[菜单] %s | enabled=%s" % (it.text, en), flush=True)
+        print("[tooltip] %s" % text(), flush=True)
+        return
     icon = pystray.Icon("mic-bridge", img(), text(), menu)
     holder["icon"] = icon
     holder["refresh"] = refresh
@@ -434,9 +486,35 @@ def main():
     ap.add_argument("--fallback-after", type=float, default=10.0,
                     help="多少秒收不到平板数据就启动实体麦兜底（默认 10）")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--dump-menu", action="store_true", help=argparse.SUPPRESS)  # 调试：打印托盘菜单后退出
+    ap.add_argument("--restart", action="store_true", help=argparse.SUPPRESS)  # 内部：重启交接进程
     a = ap.parse_args()
 
     print("mic-bridge 接收端 v%s（内置 adb / 单路取音 / WiFi+实体麦兜底）" % APP_VER)
+
+    if a.dump_menu:
+        # 调试：不需要音频设备/端口，只把真实托盘菜单与 tooltip 打到日志后退出
+        dst = dict(fb=dict(on=False, name=""), client=None, link="?", alive=True)
+        run_tray(a, dst, fatal=None, core=None, dump_only=True)
+        return 0
+
+    if a.restart:
+        # 托盘「重启程序」的交接进程：先等老实例把 5005 放掉（最多 8s），再拉起正式实例。
+        # 这样任何时刻只有一个进程持有端口，不会双实例、也不会端口冲突死锁；全程无窗口。
+        wait_until = time.time() + 8.0
+        while time.time() < wait_until and port_in_use():
+            time.sleep(0.2)
+        if port_in_use():
+            # 老实例还占着端口：绝不硬起第二个实例（新实例会静默退出 3，用户等于没有程序）
+            print("!! 旧实例 8s 内仍未释放 %d 端口，放弃本次重启（未拉起第二个实例）" % PORT)
+            return 4
+        time.sleep(0.35)   # 老进程收尾余量（300–600ms），避免交接缝隙
+        try:
+            popen_silent(launch_cmd([x for x in sys.argv[1:] if x != "--restart"]))
+        except OSError as e:
+            print("!! 重启失败：%s" % e)
+            return 1
+        return 0
 
     if a.list:
         for i, d in enumerate(sd.query_devices()):
@@ -458,7 +536,7 @@ def main():
     st = dict(recv=0, underrun=0, drop=0, conns=0, client=None, alive=True,
               link="?", water=a.water, max_water=a.max_water,
               last_rx=0.0, gap50=0, gap200=0, gapmax=0.0, pkts=0, pongs=0,
-              install_tried=False, switching=False,
+              install_tried=False, switching=False, rescan=False,
               fb=dict(on=False, idle=0.0, name="", idx=None, stream=None, fail_until=0.0))
 
     if a.out is not None:
@@ -709,11 +787,8 @@ def main():
 
     # Windows 的 SO_REUSEADDR 允许绑到**已被占用**的端口且不报错，于是会出现
     # "新接收端在打印、旧接收端在服务"这种假象。先探一下端口有没有人在听。
-    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    probe.settimeout(0.6)
-    busy = probe.connect_ex(("127.0.0.1", PORT)) == 0
-    probe.close()
-    if busy:
+    probe_busy = port_in_use()
+    if probe_busy:
         print("!! 本机 %d 端口已经有进程在监听（多半是上一个接收端还开着）。" % PORT)
         print("   本次启动静默退出（不再弹模态框）；托盘图标在右下角 ^ 里。")
         print("   查占用： netstat -ano | findstr :%d" % PORT)
@@ -786,24 +861,41 @@ def main():
             with sd.OutputStream(samplerate=SR, channels=1, dtype="int16",
                                  device=out_idx, callback=cb, blocksize=a.block, latency=lat):
                 while st["alive"]:
-                    time.sleep(2.0)
+                    # 2s 节拍里留唤醒点：托盘「重新扫描」置位后立即进入本轮探测，不用等满 2s
+                    tick = time.time() + 2.0
+                    while st["alive"] and time.time() < tick and not st.get("rescan"):
+                        time.sleep(0.05)
                     now = time.time()
                     rate = (st["recv"] - vlast) / max(now - tlast, 1e-6)
                     dpk = st["pkts"] - vpkts
                     tlast, vlast, vpkts = now, st["recv"], st["pkts"]
+                    just_rescan = st.get("rescan", False)
+                    st["rescan"] = False          # 只置回 False，不删键：下一轮唤醒循环还要读它
+                    if just_rescan:
+                        # 托盘「重新扫描设备」：清零失败计数与退避，下面这一次就是立即探测
+                        dev_next, dev_delay, dev_fails = 0.0, 2.0, 0
+                        print("[%s] 重新扫描：探测状态已清零，立即 adb devices"
+                              % time.strftime("%H:%M:%S"), flush=True)
                     if st["client"] is not None:
                         dev_next, dev_delay, dev_fails = 0.0, 2.0, 0   # 连上了，退避归零
                         st["install_tried"] = False
-                    elif adb and dev_fails < 10 and now >= dev_next:
+                    # 重新扫描时不看退避、也不管是否已有人在推流，强制再探一次并重发 reverse
+                    if adb and (just_rescan or
+                                (st["client"] is None and dev_fails < 10 and now >= dev_next)):
                         if device_present(adb):
                             dev_next, dev_delay, dev_fails = 0.0, 2.0, 0
                             if want_loopback:
                                 run_adb(adb, "reverse", "tcp:%d" % PORT, "tcp:%d" % PORT)
-                            if not st["install_tried"]:
+                            if just_rescan:
+                                print("[%s] 重新扫描：检测到平板%s"
+                                      % (time.strftime("%H:%M:%S"),
+                                         "，已重发 adb reverse" if want_loopback else ""),
+                                      flush=True)
+                            if st["client"] is None and not st["install_tried"]:
                                 st["install_tried"] = True
                                 # 只在没人在推流时动平板，免得为"顺手升级"打断用户正在用的麦克风
                                 threading.Thread(target=ensure_apk, args=(adb, a), daemon=True).start()
-                        else:
+                        elif just_rescan or st["client"] is None:
                             dev_fails += 1
                             dev_next = now + dev_delay
                             dev_delay = min(dev_delay * 2, 30.0)
