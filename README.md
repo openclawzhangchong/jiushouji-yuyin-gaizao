@@ -1,5 +1,7 @@
 # 旧平板 → Windows 语音输入麦克风（mic-bridge）
 
+![MicBridge 品牌图标](assets/brand/micbridge-appicon-256.png)
+
 把一台 **MTK MT6582 / Android 5.1 (API 21)** 的旧平板变成 Windows 能用的**真麦克风**：
 平板自己采麦，经 **USB（不是 WiFi）** 推到电脑，电脑把流灌进 VB-Cable 虚拟声卡，
 Windows 就多出一个录音设备 **`CABLE Output (VB-Audio Virtual Cable)`**，
