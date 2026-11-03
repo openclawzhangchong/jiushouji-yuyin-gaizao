@@ -1,6 +1,6 @@
 # 交接说明（HANDOVER）
 
-> 交接时间：2026-11-03。当前 `main` = `36c8bd1`，最新 tag = `v0.7.2`。
+> 交接时间：2026-11-03。整理前 `main` = `36c8bd1`，最新 tag = `v0.7.2`；本次整理提交 `ac0ae8a`（只加本文与 README 图标，未改代码）。
 > **动手前先读 [`AGENTS.md`](../AGENTS.md) 的硬约束**；本文只讲现状、习惯、构建与发布，不重复那 60 多条踩坑表。
 > 仓库内详细变更正文统一在 [`RELEASE_NOTES.md`](../RELEASE_NOTES.md)，本文不复述长文。
 
@@ -70,8 +70,8 @@ Windows 侧是 **0.7.2 per-user 安装包**，托盘常驻、无控制台窗口�
 
 ## 4. 当前状态（交接点）
 
-- **分支**：`main`，HEAD `36c8bd1 docs(release): 补记 0.7.2 托盘版本显示与重新扫描/重启入口`，与 `origin/main` 一致。
-- **最新 tag**：`v0.7.2`（annotated，tag 对象指向提交 `4b4af67`）。`main` 比 tag 多一个纯文档提交，属正常。
+- **分支**：`main`；整理前 HEAD `36c8bd1`，本次交接提交 `ac0ae8a`（README 图标 + 本文件），当时与 `origin/main` 一致；此后以 `git log -1` 为准。
+- **最新 tag**：`v0.7.2`（annotated，tag 对象指向提交 `4b4af67`）。`main` 比 tag 多若干纯文档提交（0.7.2 补记与本交接文档），均未改代码。
 - **最新 Release**：`v0.7.2`，资产三件：
   `mic-bridge-0.5.0.apk`（20,890 B）、`mic-bridge-a16-0.6.2.apk`（95,329 B）、
   `mic-bridge-setup-peruser-0.7.2.exe`（21,313,146 B）。
