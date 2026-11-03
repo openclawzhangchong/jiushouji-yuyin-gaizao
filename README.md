@@ -144,7 +144,7 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 | 变体 | 适用设备 | 产物 | 包名 / versionCode | minSdk | targetSdk | 签名 |
 |---|---|---|---|---|---|---|
 | **legacy（旧手机/旧平板首选）** | Android 5.0+；MTK 旧机、低内存、旧系统 | `release/mic-bridge-0.5.0.apk`（20,890 B） | `com.zcstudy.micbridge` / 8 | 21 | 22 | 已签 |
-| modern（Android 16） | Android 16（API 36），同时兼容 5.0+ | `release/mic-bridge-a16-0.6.1.apk`（95,330 B） | `com.zcstudy.micbridge.a16` / 10 | 21 | 36 | 已签（同一把钥匙） |
+| modern（Android 16） | Android 16（API 36），同时兼容 5.0+ | `release/mic-bridge-a16-0.6.2.apk`（95,329 B） | `com.zcstudy.micbridge.a16` / 11 | 21 | 36 | 已签（同一把钥匙） |
 
 - **legacy 是旧设备的推荐版本**：完全沿用原 `minSdk 21` / `targetSdk 22`，安装时自动授权、无运行时权限弹窗，
   针对旧机型做过验证；同包名 + `versionCode 8`，老用户可直接覆盖升级。
@@ -157,7 +157,7 @@ adb shell am start -n com.zcstudy.micbridge/.MainActivity --ez auto true
 - modern 安装/启动：
 
 ```powershell
-adb install -r release\mic-bridge-a16-0.6.1.apk
+adb install -r release\mic-bridge-a16-0.6.2.apk
 adb shell am start -n com.zcstudy.micbridge.a16/com.zcstudy.micbridge.MainActivity --ez auto true
 ```
 
@@ -192,7 +192,7 @@ modern 无 `Service`、无通知、无精确闹钟、无无障碍/悬浮窗，�
 | `acoustic_probe.py` / `look.py` | 声学回环与包络/频谱分析 |
 | `spike/` | **丢弃型**验证脚本，结论已冻结在 `PLAN.md`，别当实现参考（见 `spike/README.md`） |
 | `release/mic-bridge-0.5.0.apk` | 当前装机版本（20.9 KB，含签名）；legacy 最新产物，旧机推荐 |
-| `release/mic-bridge-a16-0.6.1.apk` | modern 产物（95.3 KB，含签名与品牌图标，Android 16 用；包名 `.a16` 可并存） |
+| `release/mic-bridge-a16-0.6.2.apk` | modern 产物（95.3 KB，含签名与定稿品牌图标，Android 16 用；包名 `.a16` 可并存） |
 | `installer/` | 中文安装包脚本（Inno Setup 7）：`installer.iss`、启动脚本、使用说明 |
 | `PLAN.md` | 决策与实测台账：每条结论带出处 |
 | `AGENTS.md` | **给接手的 AI/程序员的硬约束与禁止事项，动手前先读这个** |
